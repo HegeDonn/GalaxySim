@@ -1,0 +1,13 @@
+{
+  "format": "GSCABIN1",
+  "triangles": 100926,
+  "bytes": 19377804,
+  "objects": 473,
+  "ao_range": [
+    0.3000000000020251,
+    1.0
+  ],
+  "bake_seconds": 3.3861416669969913,
+  "source": "Assets/Blender/KeplerCabin.blend",
+  "shader": "color.w contains baked local ambient visibility"
+}

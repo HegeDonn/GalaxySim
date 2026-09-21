@@ -1,0 +1,30 @@
+# Build products
+.build/
+*.o
+*.air
+*.metallib
+DerivedData/
+
+# The app bundle is assembled by rebuild-app.sh from .build
+GalaxySim.app/
+
+# Python bytecode from the Blender tooling
+__pycache__/
+*.pyc
+
+.DS_Store
+
+# editor swap files
+*.swp
+*.swo
+
+# Private publication staging and local credentials
+public-release/
+.privacy-terms
+.env
+.env.*
+*.p12
+*.p8
+*.mobileprovision
+*.provisionprofile
+*.blend1

@@ -1,0 +1,25 @@
+{
+  "bounds": [
+    [
+      -88.62999725341797,
+      -14.787263870239258,
+      -154.0
+    ],
+    [
+      88.62999725341797,
+      30.47138023376465,
+      135.9564666748047
+    ]
+  ],
+  "format": "GSCABIN1",
+  "triangles": 106272,
+  "bytes": 20404236,
+  "objects": 1531,
+  "ao_range": [
+    0.30006904225179465,
+    1.0
+  ],
+  "bake_seconds": 2.535464749991661,
+  "source": "Assets/Blender/LumenCityShip.blend",
+  "shader": "color.w contains baked local ambient visibility"
+}
