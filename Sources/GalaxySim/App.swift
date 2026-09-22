@@ -260,16 +260,17 @@ final class MainViewController: NSViewController, MTKViewDelegate {
             self.focusFlight()
         }
         hud.onRecenter = { [weak self] in self?.chase.recenter(); self?.focusFlight() }
-        // Roll is a 1:1 drag on the stick's ring, so it lands here directly
-        // rather than being integrated per frame like the held steering.
-        hud.onRoll = { [weak self] radians in
+        // The ring hands the ship momentum, which is why this does not wait
+        // for the next frame the way the held steering does: the push happens
+        // when your finger moves, and the spinning happens afterwards.
+        hud.onRoll = { [weak self] ringTravel in
             guard let self else { return }
-            self.flight.roll(radians)
+            self.flight.spinRoll(ringTravel)
             self.focusFlight()
         }
         hud.onSpeed = { [weak self] beta in
             guard let self else { return }
-            self.flight.beta = beta
+            self.flight.commandedBeta = beta
             self.hud.update(flight: self.flight, paused: self.flightPaused)
             self.focusFlight()
         }
@@ -298,6 +299,7 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         starInspector = StarInspectorView(frame: .zero)
         starInspector.isHidden = true
         starInspector.setAnimating(false)
+        hud.onClearTarget = { [weak self] in self?.clearStarSelection() }
         starInspector.onClose = { [weak self] in self?.clearStarSelection() }
         starInspector.onVisitPlanet = { [weak self] in self?.visitSelectedPlanet() }
         view.addSubview(starInspector)
@@ -514,47 +516,52 @@ final class MainViewController: NSViewController, MTKViewDelegate {
     private func applyFlightControls(dt: Float) {
         guard isFlying else { return }
 
-        // The stick is held exactly like a key is, so it joins the same sum
-        // rather than getting a control path of its own. A tablet with no
-        // keyboard and a desk with one fly the ship identically. The throttle
-        // strip is not in this sum: it is a position, not a rate, and it sets
-        // beta directly through `onSpeed`.
+        // Nothing here moves the ship. Every control states an intention, and
+        // `FlightCamera` decides how fast a thing this size can act on it.
+        // The stick is held exactly like a key is, so the two join the same
+        // sum rather than getting a control path each: a tablet with no
+        // keyboard and a desk with one fly the ship identically.
         var throttle: Float = 0
         if heldKeys.contains("w") || heldKeys.contains("\u{f700}") { throttle += 1 }
         if heldKeys.contains("s") || heldKeys.contains("\u{f701}") { throttle -= 1 }
-        throttle = min(max(throttle, -1), 1)
         if throttle != 0 {
-            // Move in a warped coordinate so the control stays usable right up
-            // against c, where almost all the visual change happens.
-            let gap = max(1 - flight.beta, 1e-5)
-            flight.beta = min(0.99995, max(0, flight.beta + throttle * dt * 0.55 * gap))
+            // The keys walk the throttle up and down the gauge; the pad drags
+            // it. Both write the same commanded speed.
+            flight.commandedBeta = min(max(flight.commandedBeta + throttle * dt * 0.45, 0), 1)
+            hud?.update(flight: flight, paused: flightPaused)
         }
 
         var yaw: Float = hud?.padYaw ?? 0
         if heldKeys.contains("a") || heldKeys.contains("\u{f702}") { yaw -= 1 }
         if heldKeys.contains("d") || heldKeys.contains("\u{f703}") { yaw += 1 }
-        yaw = min(max(yaw, -1), 1)
-        if yaw != 0 {
-            flight.turn(yaw * dt * 0.8)
-        }
 
         // Pitch has no key of its own: the arrows are already spoken for by
         // throttle and yaw, and the stick is the control this was added for.
-        let pitch = min(max(hud?.padPitch ?? 0, -1), 1)
-        if pitch != 0 {
-            flight.pitchTurn(pitch * dt * 0.8)
-        }
+        let pitch = hud?.padPitch ?? 0
+
+        // A paused ship is a held frame: the commands above still register,
+        // so the gauge answers your thumb, but nothing integrates until you
+        // resume. Turning while paused would change the heading the whole
+        // aberration is computed from, and the frozen picture would not be
+        // the one you froze.
+        guard !flightPaused else { return }
+        flight.integrateAttitude(yaw: min(max(yaw, -1), 1), pitch: pitch, dt: dt)
+        flight.integrateThrottle(dt: dt)
     }
 
     @objc private func clearHeldKeys() {
         heldKeys.removeAll()
         hud?.releaseSteering()
+        flight.stopTurning()
     }
 
     private func focusFlight() { view.window?.makeFirstResponder(metalView) }
 
     private func setFlight(_ on: Bool) {
         isFlying = on
+        starInspector?.isHidden = on || selectedStar == nil
+        starInspector?.setAnimating(!on && selectedStar != nil)
+        hud?.hasStarTarget = selectedStar != nil
         stepAccumulator = 0
         host.clearPreview()
         cursorGround = nil
@@ -591,7 +598,8 @@ final class MainViewController: NSViewController, MTKViewDelegate {
             flight.yaw = atan2(forward.x, -forward.z)
             flight.pitch = asin(simd_clamp(forward.y, -1, 1))
             flight.travelDirection = forward
-            flight.beta = 0.5
+            flight.stopTurning()
+            flight.snapBeta(0.5)
             kidsPanel.updateStatus("Flying — press esc to come back")
         } else {
             host.camera.autoFrame = true
@@ -675,14 +683,17 @@ final class MainViewController: NSViewController, MTKViewDelegate {
 
     private func layoutStarInspector() {
         guard let starInspector else { return }
-        let h = max(320, min(850, view.bounds.height - 150))
-        starInspector.frame = NSRect(x: view.bounds.width - 338,
+        let h = max(470, min(620, view.bounds.height - 128))
+        kidsPanel?.reserveInspectorSpace(selectedStar != nil && !isFlying && view.bounds.width < 1300)
+        starInspector.frame = NSRect(x: view.bounds.width - 398,
                                      y: view.bounds.height - h - 24,
-                                     width: 320, height: h)
+                                     width: 380, height: h)
     }
 
     private func clearStarSelection() {
         selectedStar = nil
+        hud?.hasStarTarget = false
+        kidsPanel?.reserveInspectorSpace(false)
         stellarProfile = nil
         host?.renderer.selectedParticleIndex = nil
         starInspector?.isHidden = true
@@ -725,8 +736,9 @@ final class MainViewController: NSViewController, MTKViewDelegate {
                                           galaxy: host.sim.galaxyName(at: Int(population >> 8)))
         stellarProfile = profile
         starInspector.update(profile: profile)
-        starInspector.isHidden = false
-        starInspector.setAnimating(true)
+        starInspector.isHidden = isFlying
+        starInspector.setAnimating(!isFlying)
+        hud.hasStarTarget = true
         layoutStarInspector()
         host.camera.autoOrbit = false
     }
@@ -897,12 +909,32 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         metalView.onClick?(click!)
         check(selectedStar != nil && !starInspector.isHidden, "Click opens selected-star inspector")
         let selection = selectedStar
+        // A press inside the card must not reach the sky behind it. The sky's
+        // click handler reads a miss as "nothing selected" and puts the card
+        // away, which is what made the card vanish when you poked at it.
+        view.layoutSubtreeIfNeeded()
+        let cardMid = starInspector.convert(NSPoint(x: starInspector.bounds.midX,
+                                                    y: starInspector.bounds.midY), to: nil)
+        let hit = view.window?.contentView?.hitTest(cardMid)
+        check(hit?.isDescendant(of: starInspector) == true,
+              "A press in the middle of the card lands on the card, not on the sky")
+        if let win = view.window {
+            for kind in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let e = NSEvent.mouseEvent(with: kind, location: cardMid, modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: win.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1) {
+                    win.sendEvent(e)
+                }
+            }
+        }
+        check(!starInspector.isHidden, "Pressing on the card leaves the card up")
         metalView.onDrag?(20, 10)
         check(selectedStar == selection, "Dragging the camera preserves selected identity")
         func screenshot(_ name: String) throws {
             view.layoutSubtreeIfNeeded()
             if let planet = planetObservatory { check(planet.reviewDraw(), planet.renderError ?? "Planet GPU frame completed") }
-            else { metalView.draw() }
+            else { metalView.draw(); starInspector.reviewDrawPortrait() }
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.8))
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
@@ -928,29 +960,50 @@ final class MainViewController: NSViewController, MTKViewDelegate {
             check(true, "Captured " + name + " (AppKit controls only; no window capture available)")
         }
         try screenshot("star-inspector")
-        if let scroll = starInspector.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView {
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: 300))
-            scroll.reflectScrolledClipView(scroll.contentView)
+        for size in [NSSize(width: 1000, height: 650), NSSize(width: 1440, height: 900)] {
+            view.window?.setContentSize(size)
+            view.layoutSubtreeIfNeeded()
+            for page in 0..<3 {
+                starInspector.reviewPage(page)
+                check(starInspector.reviewContentFits, "Star page fits without scrolling at \(Int(size.width)), page \(page)")
+                try screenshot("star-page-\(page)-\(Int(size.width))")
+            }
         }
-        try screenshot("star-story")
-        // Scroll to the very end: the story block used to be clipped by a
-        // hardcoded content height, so the tail of the card is now an artefact
-        // the review looks at every run.
-        if let scroll = starInspector.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView,
-           let document = scroll.documentView {
-            let bottom = max(0, document.frame.height - scroll.contentSize.height)
-            check(document.frame.height > scroll.contentSize.height, "Star card content is taller than its window")
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom))
-            scroll.reflectScrolledClipView(scroll.contentView)
+        starInspector.reviewPage(0)
+        let savedProfile = stellarProfile!
+        for kind in [ParticleKind.oldDisk, .youngDisk, .bulge] {
+            let sample = StellarProfile.make(index: 42, population: kind.rawValue, galaxy: "Example galaxy")
+            starInspector.update(profile: sample)
+            try screenshot("portrait-kind-\(kind.rawValue)")
+            if kind == .oldDisk { try screenshot("portrait-kind-\(kind.rawValue)-later") }
         }
-        try screenshot("star-fate")
-        view.window?.setContentSize(NSSize(width: 1000, height: 650))
-        try screenshot("star-small-window")
-        view.window?.setContentSize(NSSize(width: 1440, height: 900))
+        starInspector.update(profile: savedProfile)
+        starInspector.reviewComparison()
+        try screenshot("star-sun-outline")
+        setFlight(true)
+        check(starInspector.isHidden && selectedStar == selection, "Flight hides the card and keeps the star target")
+        try screenshot("flight-star-target")
+        setFlight(false)
+        check(!starInspector.isHidden, "Returning from flight restores the selected star card")
         let previousPause = host.sim.isPaused
         visitSelectedPlanet()
         check(planetObservatory != nil && host.sim.isPaused && metalView.isPaused, "Planet entry freezes parent simulation")
         let planet = planetObservatory!
+        check(KidsStyle.nightVision, "Standing on the planet turns the chrome red")
+        check(planet.reviewReadingToggle, "Night text toggles white and back to its original red styling")
+        // Every pill on this screen carries a sentence, and a sentence in a
+        // lozenge is the thing that was stealing the sky. They have to be
+        // glyphs, and they still have to be 44 points to hit.
+        planet.layoutSubtreeIfNeeded()
+        let planetPills = planet.reviewTouchTargets
+        check(!planetPills.isEmpty, "The observatory has pills to check")
+        check(planet.reviewGlassOnFace, "The frosted glass sits exactly on the dial's face")
+        for pill in planetPills {
+            check(pill.isIconOnly || pill.title.count <= pill.iconOnlyOverLength,
+                  "Observatory pill '\(pill.title)' is a glyph, not a sentence")
+            check(min(pill.frame.width, pill.frame.height) >= KidsStyle.touchTarget,
+                  "Observatory pill '\(pill.title)' is still finger-sized")
+        }
         check(abs(planet.reviewExposure(seconds: 30, openFor: 15) - 0.5) < 0.0001,
               "30-second exposure reaches halfway after 15 seconds")
         check(abs(planet.reviewKeepsLightWhileMoving(for: 3) - 0.6) < 0.0001,
@@ -1038,6 +1091,9 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         planet.reviewViewfinder(seconds: 4)
         check(planet.reviewDraw(), planet.renderError ?? "Sun-like daylight frame")
         check(planet.reviewStarAltitude > 0, "The Sun-like star is up")
+        // Red light is for a dark sky. Standing in real daylight it buys
+        // nothing and costs the screen its legibility, so it goes away.
+        check(!KidsStyle.nightVision, "Real daylight takes the red light away")
         let auto = planet.reviewAutoShutter
         check(auto != nil, "Daylight past the dial makes the camera meter for itself")
         check(auto! < 0.25 && auto! > 1.0 / 4000,
@@ -1076,6 +1132,11 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         leavePlanet()
         check(planetObservatory == nil && host.sim.isPaused == previousPause && selectedStar == selection,
               "Returning restores prior pause state and selected star")
+        check(!KidsStyle.nightVision, "Leaving the planet gives the rest of the app its colour back")
+        // And a picture of it, because "the flag is false" is not the same
+        // claim as "the buttons are blue again": a control that is never
+        // asked to redraw keeps the palette it was last painted in.
+        try screenshot("galaxy-after-planet")
         metalView.isPaused = true
         host.sim.restart()
         metalView.draw()
@@ -1147,10 +1208,18 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         let beta = flight.beta
         metalView.onKey?("s"); applyFlightControls(dt: 0.1); metalView.onKeyUp?("s")
         check(flight.beta < beta, "S reduces speed")
-        metalView.onKey?("d"); applyFlightControls(dt: 0.1); metalView.onKeyUp?("d")
+        metalView.onKey?("d")
+        for _ in 0..<20 { applyFlightControls(dt: 0.05) }
+        metalView.onKeyUp?("d")
         check(flight.travelDirection.x > heading.x, "D turns ship right independently of view")
-        metalView.onKey?("a"); applyFlightControls(dt: 0.1); metalView.onKeyUp?("a")
-        check(simd_length(flight.travelDirection - heading) < 0.00001, "A turns ship left")
+        let rightmost = flight.travelDirection
+        flight.stopTurning()
+        metalView.onKey?("a")
+        for _ in 0..<20 { applyFlightControls(dt: 0.05) }
+        metalView.onKeyUp?("a")
+        flight.stopTurning()
+        check(flight.travelDirection.x < rightmost.x, "A turns ship left")
+        flight.travelDirection = heading
         let zoomBefore = chase.distance
         metalView.onScroll?(12); chase.update(dt: 1)
         check(chase.distance < zoomBefore, "Scroll zooms toward ship")
@@ -1186,48 +1255,91 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         check(throttleStrip.frame.width >= 44 && stickPad.frame.width >= 44,
               "Both pads are wide enough for a thumb, not just tall enough")
 
-        flight.beta = 0.5
+        // ---- the throttle asks; the ship takes its time ---------------
+        flight.stopTurning()
+        flight.snapBeta(0.5)
         hud.update(flight: flight)
-        let slideStart = flight.beta
+        let slideStart = flight.commandedBeta
         hud.reviewThrottleSlide(30)
-        check(flight.beta > slideStart, "Sliding a thumb up the speed pad speeds the ship up")
-        let firstStep = flight.beta - slideStart
-        let afterFirstSlide = flight.beta
+        check(flight.commandedBeta > slideStart, "Sliding a thumb up the speed pad asks for more speed")
+        check(flight.beta == slideStart, "Asking is not getting: nothing has accelerated yet")
+        let firstStep = flight.commandedBeta - slideStart
+        let afterFirstSlide = flight.commandedBeta
         hud.reviewThrottleSlide(30)
         // Relative, not absolute. An absolute pad would jump to wherever the
         // thumb landed, so the second slide would go nowhere — and the first
         // touch would always yank the ship.
-        check(abs((flight.beta - afterFirstSlide) - firstStep) < 0.001,
+        check(abs((flight.commandedBeta - afterFirstSlide) - firstStep) < 0.001,
               "The speed pad is relative: the same slide again adds the same again")
+        applyFlightControls(dt: 0.1)
+        check(flight.beta > slideStart && flight.beta < flight.commandedBeta,
+              "The ship accelerates toward the commanded speed instead of arriving at it")
+        let partWayUp = flight.beta
+        for _ in 0..<200 { applyFlightControls(dt: 0.05) }
+        check(flight.beta > partWayUp && abs(flight.beta - flight.commandedBeta) < 0.001,
+              "Given long enough, it gets there")
         hud.reviewThrottleSlide(-60)
-        check(abs(flight.beta - slideStart) < 0.001, "Sliding back down brakes to where it started")
+        check(abs(flight.commandedBeta - slideStart) < 0.001, "Sliding back down asks it to brake")
+        for _ in 0..<200 { applyFlightControls(dt: 0.05) }
+        check(abs(flight.beta - slideStart) < 0.001, "And it brakes, in its own time")
 
+        // ---- the stick has to spin the ship up ------------------------
+        flight.stopTurning()
         let padHeading = flight.travelDirection
         hud.reviewSteer(x: 1, y: 0)
-        applyFlightControls(dt: 0.1)
-        hud.reviewSteer(x: 0, y: 0)
+        applyFlightControls(dt: 0.05)
+        check(flight.yawRate > 0 && flight.yawRate < FlightCamera.maxTurnRate * 0.25,
+              "The stick spins the ship up rather than snapping it to a turn rate")
+        for _ in 0..<80 { applyFlightControls(dt: 0.05) }
+        check(flight.yawRate > FlightCamera.maxTurnRate * 0.9, "Held long enough it reaches full rate")
         check(flight.travelDirection.x > padHeading.x, "Pushing the stick right steers the ship right")
-        hud.reviewSteer(x: -1, y: 0)
-        applyFlightControls(dt: 0.1)
         hud.reviewSteer(x: 0, y: 0)
-        check(simd_length(flight.travelDirection - padHeading) < 0.00001, "Pushing it left steers back")
-        hud.reviewSteer(x: 0, y: 1)
+        let letGo = flight.travelDirection
         applyFlightControls(dt: 0.1)
+        check(simd_length(flight.travelDirection - letGo) > 0.0001,
+              "Letting go does not stop the ship dead: it carries on turning")
+        for _ in 0..<300 { applyFlightControls(dt: 0.05) }
+        check(flight.yawRate == 0, "Drag brings the turn to a stop on its own")
+        let settled = flight.travelDirection
+        applyFlightControls(dt: 0.1)
+        check(simd_length(flight.travelDirection - settled) < 0.000001,
+              "A ship with nothing on the stick holds its heading")
+
+        flight.stopTurning()
+        flight.travelDirection = padHeading
+        hud.reviewSteer(x: -1, y: 0)
+        for _ in 0..<40 { applyFlightControls(dt: 0.05) }
+        hud.reviewSteer(x: 0, y: 0)
+        check(flight.travelDirection.x < padHeading.x, "Pushing it left steers the other way")
+
+        flight.stopTurning()
+        flight.travelDirection = padHeading
+        hud.reviewSteer(x: 0, y: 1)
+        for _ in 0..<40 { applyFlightControls(dt: 0.05) }
         hud.reviewSteer(x: 0, y: 0)
         check(flight.travelDirection.y > padHeading.y, "Pushing the stick up lifts the nose")
-        hud.reviewSteer(x: 0, y: -1)
-        applyFlightControls(dt: 0.1)
-        hud.reviewSteer(x: 0, y: 0)
-        check(simd_length(flight.travelDirection - padHeading) < 0.00001, "Pushing it down puts the nose back down")
 
-        // ---- the roll ring --------------------------------------------
+        flight.stopTurning()
+        flight.travelDirection = padHeading
+        hud.reviewSteer(x: 0, y: -1)
+        for _ in 0..<40 { applyFlightControls(dt: 0.05) }
+        hud.reviewSteer(x: 0, y: 0)
+        check(flight.travelDirection.y < padHeading.y, "Pushing it down puts the nose down")
+
+        // ---- the roll ring is a flywheel ------------------------------
+        flight.stopTurning()
+        flight.travelDirection = padHeading
         let rollUp = flight.shipUp
         let rollAspect = Float(1440) / 900
         let beforeRoll = chase.galaxyView(aspect: rollAspect, flight: flight).0
         hud.reviewRollDrag(0.6)
+        check(flight.rollRate > 0, "Turning the ring hands the ship momentum, not an angle")
+        check(simd_length(flight.shipUp - rollUp) < 0.000001,
+              "The ring on its own moves nothing: the ship still has to spin up")
+        applyFlightControls(dt: 0.1)
+        check(simd_length(flight.shipUp - rollUp) > 0.001, "Once it is turning, it rolls")
         check(chase.galaxyView(aspect: rollAspect, flight: flight).0 != beforeRoll,
-              "Turning the ring actually tilts the view of the galaxy")
-        check(simd_length(flight.shipUp - rollUp) > 0.01, "Rolling tilts the ship's own up")
+              "Rolling actually tilts the view of the galaxy")
         check(abs(simd_dot(flight.shipUp, flight.travelDirection)) < 0.0001,
               "The ship's frame stays square while it rolls")
         // Roll is a pure re-orientation: the boost is along the direction of
@@ -1235,17 +1347,28 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         // sky turns and the aberration bullseye stays nailed where it was.
         check(simd_length(flight.travelDirection - padHeading) < 0.00001,
               "Rolling leaves the direction of travel, and so the optics, untouched")
-        hud.reviewRollDrag(-0.6)
-        check(simd_length(flight.shipUp - rollUp) < 0.00001, "Rolling back levels the ship again")
+        for _ in 0..<600 { applyFlightControls(dt: 0.05) }
+        check(flight.rollRate == 0, "The roll winds itself down")
+        // `rollGain * rollDrag == 1`, so the ship ends up exactly where the
+        // finger asked — it just took its time getting there.
+        let rolled = acos(min(max(simd_dot(flight.shipUp, rollUp), -1), 1))
+        check(abs(rolled - 0.6) < 0.02, "A ring drag rolls the ship by its own angle, in the end")
+
+        // ---- what the picture is doing --------------------------------
+        check(FlightHUD.explanation(beta: 0.1).isEmpty, "Nothing to explain at a tenth of light speed")
+        check(FlightHUD.explanation(beta: 0.995).contains("dot"),
+              "The HUD says why the sky collapsed to a dot")
 
         // A stick that is still down when the window goes away never gets its
         // mouse-up, so the ship would turn for ever with nothing on screen.
+        flight.stopTurning()
+        flight.travelDirection = padHeading
         hud.reviewSteer(x: 1, y: 1)
+        applyFlightControls(dt: 0.1)
         clearHeldKeys()
         applyFlightControls(dt: 0.1)
-        check(hud.padYaw == 0 && hud.padPitch == 0
-              && simd_length(flight.travelDirection - padHeading) < 0.00001,
-              "Losing the window lets go of the stick")
+        check(hud.padYaw == 0 && hud.padPitch == 0 && flight.yawRate == 0 && flight.pitchRate == 0,
+              "Losing the window lets go of the stick and stops the turn")
                 (hud.reviewControl("flight.follow") as! PillButton).simulateTap()
         chase.update(dt: 2)
         check(abs(chase.yaw - 0.30) < 0.001, "Visible Follow restores the view from behind")
@@ -1271,13 +1394,16 @@ final class MainViewController: NSViewController, MTKViewDelegate {
             view.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             view.layoutSubtreeIfNeeded()
-            flight.beta = 0.5
+            flight.snapBeta(0.5)
             hud.update(flight: flight)
             hud.layoutSubtreeIfNeeded()
             // Everything with a target on it, rather than a hand-listed set
             // of classes: a filter naming classes silently stops testing
             // anything the day the classes change, and it did.
-            let controls = hud.subviews.compactMap { $0 as? TouchTarget }
+            // Hidden means "not on screen", so it is not a target and has no
+            // frame to check -- the clear-target pill only exists while a star
+            // is selected.
+            let controls = hud.subviews.compactMap { $0 as? TouchTarget }.filter { !$0.isHidden }
             for c in controls where !(hud.bounds.contains(c.frame) && c.frame.height >= 44) {
                 fputs("off the pad: \(c.identifier?.rawValue ?? "?") \(c.frame) in \(hud.bounds)\n", stderr)
             }
@@ -1287,6 +1413,7 @@ final class MainViewController: NSViewController, MTKViewDelegate {
                   "The ship is fully drivable with no keyboard")
             check(controls.allSatisfy { hud.bounds.contains($0.frame) && $0.frame.height >= 44 },
                   "Ship controls fit and stay finger-sized at \(width) pixels")
+            check(hud.reviewExplanationFits, "The sky explanation fits on one line at \(width) pixels")
             for i in controls.indices {
                 for j in controls.indices where j > i {
                     check(!controls[i].frame.intersects(controls[j].frame), "Native controls do not overlap")

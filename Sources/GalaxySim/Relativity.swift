@@ -378,6 +378,19 @@ final class FlightCamera {
         didSet { beta = min(max(beta, 0), Relativity.betaMax) }
     }
 
+    /// Where the throttle is set, as opposed to where the ship has got to.
+    /// The gauge writes here; `beta` chases it. See `integrateThrottle`.
+    var commandedBeta: Float = 0.5 {
+        didSet { commandedBeta = min(max(commandedBeta, 0), Relativity.betaMax) }
+    }
+
+    /// Put the ship at a speed with no ramp: resets, presets and diagnostics,
+    /// where the journey to the speed is not the thing being tested.
+    func snapBeta(_ b: Float) {
+        beta = b
+        commandedBeta = beta
+    }
+
     /// True speed for the HUD, in km/s. Not affected by `flightTimeScale`.
     var speedKmS: Double { Double(beta) * Relativity.cKmS }
 
@@ -443,6 +456,94 @@ final class FlightCamera {
         let q = simd_quatf(angle: amount, axis: shipRight)
         storedTravel = simd_normalize(q.act(storedTravel))
         shipUp = simd_normalize(q.act(shipUp))
+    }
+
+    // MARK: inertia
+    //
+    // The controls used to set the attitude directly: hold the pad, the ship
+    // turned at a fixed rate; let go, it stopped dead. That reads as a cursor,
+    // not as a ship. These rates give it mass — every input asks for a rate
+    // and the ship eases toward it, and everything coasts back down through
+    // drag when the input goes away.
+    //
+    // Drag in vacuum is of course a lie. A real ship stops turning by firing
+    // thrusters the other way, and the honest version of this would make you
+    // do that by hand. That is a flight simulator, and this is a game about
+    // looking at galaxies, so the ship flies itself level: the lie buys the
+    // heaviness without making anyone fight it.
+
+    /// Radians per second about the ship's own axes.
+    private(set) var yawRate: Float = 0
+    private(set) var pitchRate: Float = 0
+    private(set) var rollRate: Float = 0
+
+    /// How hard the stick can push, and how long the ship takes to get most
+    /// of the way there. A second and a bit is heavy without being sluggish.
+    static let maxTurnRate: Float = 0.85
+    static let turnLag: Float = 1.15
+    /// Roll is the one you wind up and let run, so it is set by a different
+    /// rule: `rollGain * rollDrag == 1`. That makes a ring drag worth exactly
+    /// its own angle *in the end* — keep dragging and the ship settles into
+    /// rolling at precisely the speed of your finger — while the ship still
+    /// lags behind the finger going in and coasts past it coming out. One to
+    /// one in the long run, heavy in the moment.
+    static let maxRollRate: Float = 2.4
+    static let rollDrag: Float = 1.3
+    static let rollGain: Float = 1 / rollDrag
+
+    /// Wind the roll ring. This adds angular momentum rather than setting an
+    /// angle, so a flick keeps the ship turning and then it coasts to a stop.
+    func spinRoll(_ ringTravel: Float) {
+        rollRate = min(max(rollRate + ringTravel * Self.rollGain, -Self.maxRollRate), Self.maxRollRate)
+    }
+
+    /// One frame of attitude: ease the commanded rates in, drag the rest out,
+    /// then actually turn by what is left.
+    func integrateAttitude(yaw: Float, pitch: Float, dt: Float) {
+        guard dt > 0, dt.isFinite else { return }
+        let ease = 1 - exp(-dt / Self.turnLag)
+        yawRate += (min(max(yaw, -1), 1) * Self.maxTurnRate - yawRate) * ease
+        pitchRate += (min(max(pitch, -1), 1) * Self.maxTurnRate - pitchRate) * ease
+        // Nothing commands a roll *rate*; the ring hands it momentum and drag
+        // takes it away again.
+        rollRate *= exp(-dt / Self.rollDrag)
+
+        // An exponential never reaches zero, and a ship that keeps turning at
+        // a millionth of a radian a second drifts off heading if you leave it
+        // running. Park the rates when they stop being visible.
+        if abs(yawRate) < 1e-4 { yawRate = 0 }
+        if abs(pitchRate) < 1e-4 { pitchRate = 0 }
+        if abs(rollRate) < 1e-4 { rollRate = 0 }
+
+        if yawRate != 0 { turn(yawRate * dt) }
+        if pitchRate != 0 { pitchTurn(pitchRate * dt) }
+        if rollRate != 0 { roll(rollRate * dt) }
+    }
+
+    /// Let go of every rate at once: leaving the ship, or losing the window.
+    func stopTurning() {
+        yawRate = 0
+        pitchRate = 0
+        rollRate = 0
+    }
+
+    /// Proper acceleration, in rapidity per second.
+    ///
+    /// Rapidity is the thing that actually adds up when you keep burning:
+    /// beta does not, which is exactly why you cannot get to c by burning for
+    /// twice as long. At a steady push the rapidity climbs at a steady rate
+    /// and beta = tanh of it, so the first half of the gauge costs about a
+    /// second and the last sliver costs the rest of the minute. That is the
+    /// real shape of the thing, and it happens to be the heaviness this was
+    /// asked for — no fudge factor needed.
+    static let properAcceleration: Float = 0.8
+
+    func integrateThrottle(dt: Float) {
+        guard dt > 0, dt.isFinite else { return }
+        let here = atanh(min(beta, Relativity.betaMax))
+        let wanted = atanh(min(commandedBeta, Relativity.betaMax))
+        let step = Self.properAcceleration * dt
+        beta = tanh(here + min(max(wanted - here, -step), step))
     }
 
     /// Roll about the heading. Nothing but the frame moves.

@@ -38,19 +38,70 @@ enum KidsStyle {
         NSColor(srgbRed: 0.055 + lift, green: 0.065 + lift, blue: 0.105 + lift, alpha: 0.95)
     }
 
-    /// The user's own accent, as chosen in System Settings.
-    static var accent: NSColor { .controlAccentColor }
+    /// Red-light mode for the screens where the point is the sky.
+    ///
+    /// Rods — the cells you see faint stars with — are nearly blind past
+    /// about 620 nm, so deep red chrome can be perfectly readable without
+    /// spending the dark adaptation that takes twenty minutes to build and
+    /// one white button to destroy. It is why observatories, ships' bridges
+    /// and aircraft cockpits have run on red light for a century, and it is
+    /// the right palette for a person standing on a planet at night.
+    ///
+    /// A screen mode rather than a per-control flag: the observatory fills
+    /// the window, so while it is up *everything* on screen is a night view.
+    /// Turning it on or off repaints the app. Every colour below is read at
+    /// draw time, so a control that is not asked to redraw keeps whichever
+    /// palette it was last painted in -- which is how the galaxy screen came
+    /// back from a planet with red buttons on it.
+    static var nightVision = false {
+        didSet {
+            guard nightVision != oldValue else { return }
+            for window in NSApplication.shared.windows { window.contentView?.repaintTree() }
+        }
+    }
 
-    /// The same accent lifted toward white, for small text and hairlines
-    /// that sit *on* a night plate. A saturated accent at 10 points on
-    /// near-black is legible in a mockup and not on a screen.
-    static let accentOnNight: NSColor = {
-        let fallback = NSColor(srgbRed: 0.55, green: 0.85, blue: 0.97, alpha: 1)
-        guard let a = NSColor.controlAccentColor.usingColorSpace(.sRGB) else { return fallback }
-        func lift(_ c: CGFloat) -> CGFloat { min(1, c * 0.55 + 0.45) }
-        return NSColor(srgbRed: lift(a.redComponent), green: lift(a.greenComponent),
-                       blue: lift(a.blueComponent), alpha: 1)
-    }()
+    // The red-light tones below keep green and blue near zero on purpose.
+    // Lift either one and the hue slides towards pink, which is exactly the
+    // part of the spectrum the rods are still sensitive to — a pink control
+    // is a white control wearing a hat.
+    static var accent: NSColor {
+        nightVision ? NSColor(srgbRed: 0.44, green: 0.025, blue: 0.015, alpha: 1)
+                    : NSColor(srgbRed: 0.16, green: 0.48, blue: 0.82, alpha: 1)
+    }
+    static var accentOnNight: NSColor {
+        nightVision ? NSColor(srgbRed: 0.98, green: 0.20, blue: 0.06, alpha: 1)
+                    : NSColor(srgbRed: 0.62, green: 0.86, blue: 1, alpha: 1)
+    }
+    static func button(_ lift: CGFloat = 0) -> NSColor {
+        nightVision
+            ? NSColor(srgbRed: 0.155 + lift * 1.6, green: 0.011 + lift * 0.1,
+                      blue: 0.008 + lift * 0.1, alpha: 0.94)
+            : NSColor(srgbRed: 0.10 + lift, green: 0.25 + lift, blue: 0.42 + lift, alpha: 1)
+    }
+
+    /// A plain white-grey tone, or its red-light equivalent. Chrome drawn
+    /// as bare `calibratedWhite` — rings, arcs, the shutter bulb — comes
+    /// through here so red-light mode reaches it too. A white shutter the
+    /// size of a thumb is the brightest object on a night screen and costs
+    /// more dark adaptation than every label put together.
+    static func lamp(_ white: CGFloat, alpha: CGFloat = 1) -> NSColor {
+        nightVision ? NSColor(srgbRed: min(1, white * 1.02), green: white * 0.055,
+                              blue: white * 0.025, alpha: alpha)
+                    : NSColor(calibratedWhite: white, alpha: alpha)
+    }
+
+    /// The amber an instrument uses for the number it is reading out. Goes
+    /// deeper into the red under red light, where amber is already halfway.
+    static var readout: NSColor {
+        nightVision ? NSColor(srgbRed: 1, green: 0.17, blue: 0.02, alpha: 1)
+                    : NSColor(calibratedRed: 1, green: 0.78, blue: 0.20, alpha: 1)
+    }
+
+    /// Lettering *on* the chrome. White text on a red button costs exactly
+    /// what the red button saved, so in night mode the type goes red too.
+    static var chromeInk: NSColor {
+        nightVision ? NSColor(srgbRed: 0.97, green: 0.18, blue: 0.06, alpha: 0.95) : ink
+    }
 
     static let ink = NSColor.white
     static let body = NSColor.white.withAlphaComponent(0.84)
@@ -81,7 +132,7 @@ extension ChunkyButton: TouchTarget {}
 final class PillButton: NSControl {
 
     var title: String = "" {
-        didSet { invalidateIntrinsicContentSize(); needsDisplay = true }
+        didSet { reloadSymbol(); invalidateIntrinsicContentSize(); needsDisplay = true }
     }
     /// Optional SF Symbol drawn ahead of the title; falls back to nothing
     /// rather than to a blank box if the symbol is unavailable.
@@ -93,8 +144,18 @@ final class PillButton: NSControl {
     var isProminent = false { didSet { needsDisplay = true } }
     var minHeight: CGFloat = KidsStyle.touchTarget { didSet { invalidateIntrinsicContentSize() } }
     var horizontalPadding: CGFloat = 18 { didSet { invalidateIntrinsicContentSize() } }
-    var fontSize: CGFloat = 14 { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
+    var fontSize: CGFloat = 16 { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
+    /// Past this many characters a pill with a symbol drops its title and
+    /// becomes a square icon. "Land somewhere else" set in a lozenge stops
+    /// being a button and starts being a sentence you have to read before
+    /// you can act on it; a pin glyph is understood at a glance and stops
+    /// competing with the thing the screen is actually about. The words are
+    /// not lost — they stay as the tooltip and the accessibility label.
+    var iconOnlyOverLength = 14 { didSet { reloadSymbol(); invalidateIntrinsicContentSize(); needsDisplay = true } }
     var onTap: (() -> Void)?
+
+    /// True when this pill has given up its words.
+    var isIconOnly: Bool { symbol != nil && title.count > iconOnlyOverLength }
 
     private var symbol: NSImage?
     private var pressed = false { didSet { needsDisplay = true } }
@@ -116,14 +177,20 @@ final class PillButton: NSControl {
         symbol = NSImage(systemSymbolName: name, accessibilityDescription: title)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: fontSize + 1,
                                                                  weight: .semibold))
+        guard isIconOnly else { return }
+        symbol = NSImage(systemSymbolName: name, accessibilityDescription: title)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: fontSize + 6,
+                                                                 weight: .semibold))
+        toolTip = title
     }
 
     private var titleAttributes: [NSAttributedString.Key: Any] {
         [.font: KidsStyle.font(fontSize, .semibold),
-         .foregroundColor: isProminent ? NSColor.white : KidsStyle.ink]
+         .foregroundColor: isProminent ? NSColor.white : KidsStyle.chromeInk]
     }
 
     override var intrinsicContentSize: NSSize {
+        if isIconOnly { return NSSize(width: minHeight, height: minHeight) }
         let textWidth = (title as NSString).size(withAttributes: titleAttributes).width
         let symbolWidth = symbol.map { $0.size.width + 8 } ?? 0
         return NSSize(width: (textWidth + symbolWidth + horizontalPadding * 2).rounded(.up),
@@ -139,7 +206,7 @@ final class PillButton: NSControl {
         if isProminent {
             KidsStyle.accent.withAlphaComponent(pressed ? 1.0 : (hovering ? 0.95 : 0.85)).setFill()
         } else {
-            KidsStyle.night(pressed ? 0.10 : (hovering ? 0.05 : 0)).setFill()
+            KidsStyle.button(pressed ? 0.12 : (hovering ? 0.06 : 0)).setFill()
         }
         path.fill()
         (isProminent ? NSColor.white.withAlphaComponent(0.25)
@@ -147,15 +214,23 @@ final class PillButton: NSControl {
         path.lineWidth = 1
         path.stroke()
 
+        let tint = isProminent ? NSColor.white : KidsStyle.chromeInk
+        if isIconOnly, let symbol {
+            let side = min(symbol.size.width, symbol.size.height)
+            let dr = NSRect(x: (r.midX - symbol.size.width / 2).rounded(),
+                            y: (r.midY - symbol.size.height / 2).rounded(),
+                            width: symbol.size.width, height: max(side, symbol.size.height))
+            KidsPanel.tinted(symbol, tint).draw(in: dr)
+            return
+        }
         let text = NSAttributedString(string: title, attributes: titleAttributes)
         let textSize = text.size()
         let symbolWidth = symbol.map { $0.size.width + 8 } ?? 0
         var x = (r.midX - (textSize.width + symbolWidth) / 2).rounded()
         if let symbol {
-            let tint = KidsStyle.ink
             let dr = NSRect(x: x, y: (r.midY - symbol.size.height / 2).rounded(),
                             width: symbol.size.width, height: symbol.size.height)
-            KidsPanel.tinted(symbol, isProminent ? .white : tint).draw(in: dr)
+            KidsPanel.tinted(symbol, tint).draw(in: dr)
             x += symbolWidth
         }
         text.draw(at: NSPoint(x: x, y: (r.midY - textSize.height / 2).rounded()))
@@ -193,4 +268,13 @@ final class PillButton: NSControl {
 
     override var acceptsFirstResponder: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+extension NSView {
+    /// Mark this view and everything under it as needing to be drawn again.
+    /// Used when the palette changes underneath views that are already up.
+    func repaintTree() {
+        needsDisplay = true
+        for view in subviews { view.repaintTree() }
+    }
 }

@@ -350,16 +350,16 @@ final class SkyMenuButton: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let inset = bounds.insetBy(dx: 2, dy: 2)
         let circle = NSBezierPath(ovalIn: inset)
-        NSColor(calibratedWhite: pressed ? 0.26 : (hovering ? 0.20 : 0.14),
-                alpha: hovering || pressed ? 0.92 : 0.72).setFill()
+        KidsStyle.lamp(pressed ? 0.26 : (hovering ? 0.20 : 0.14),
+                       alpha: hovering || pressed ? 0.92 : 0.72).setFill()
         circle.fill()
-        NSColor(calibratedWhite: 1, alpha: hovering ? 0.30 : 0.16).setStroke()
+        KidsStyle.lamp(1, alpha: hovering ? 0.30 : 0.16).setStroke()
         circle.lineWidth = 1
         circle.stroke()
 
         let width = inset.width * 0.42
         let x = inset.midX - width / 2
-        NSColor(calibratedWhite: 0.94, alpha: 0.92).setStroke()
+        KidsStyle.lamp(0.94, alpha: 0.92).setStroke()
         let bars = NSBezierPath()
         bars.lineWidth = 1.6
         bars.lineCapStyle = .round

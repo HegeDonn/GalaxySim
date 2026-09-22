@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import CoreImage
 import QuartzCore
 import simd
 
@@ -9,6 +10,43 @@ struct ObservatoryStar {
     var direction: SIMD3<Float>
     var color: SIMD3<Float>
     var brightness: Float
+}
+
+/// A reversible reading highlight, independent of the sky's night palette.
+private final class SkyReadingLabel: NSTextField {
+    private var restingText: NSAttributedString?
+    private var restingColor: NSColor?
+    var isReading: Bool { restingText != nil }
+
+    func endReading() {
+        guard let original = restingText else { return }
+        // Status text can change while highlighted; restore its color, never old words.
+        let restored = NSMutableAttributedString(attributedString: attributedStringValue)
+        let color = original.length > 0
+            ? original.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+            : restingColor
+        restored.addAttribute(.foregroundColor, value: color ?? KidsStyle.chromeInk,
+                              range: NSRange(location: 0, length: restored.length))
+        attributedStringValue = restored
+        textColor = restingColor
+        restingText = nil
+        restingColor = nil
+    }
+
+    func toggleReading() {
+        if isReading { endReading(); return }
+        guard KidsStyle.nightVision else { return }
+        restingText = attributedStringValue.copy() as? NSAttributedString
+        restingColor = textColor
+        let readable = NSMutableAttributedString(attributedString: attributedStringValue)
+        readable.addAttribute(.foregroundColor, value: NSColor.white,
+                              range: NSRange(location: 0, length: readable.length))
+        attributedStringValue = readable
+        textColor = .white
+    }
+
+    override func mouseDown(with event: NSEvent) { toggleReading() }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// An imagined planet's night sky. The landscape/atmosphere are illustrative;
@@ -22,7 +60,7 @@ final class PlanetObservatoryView: NSView {
     var onBack: (() -> Void)?
     private let sky: ObservatoryMetalView
     private let progress = NSProgressIndicator()
-    private let status = NSTextField(labelWithString: "")
+    private let status = SkyReadingLabel(labelWithString: "")
     private let dial = ExposureDial()
     private let shutter = ShutterButton()
     private let focal = FocalLengthToggle()
@@ -37,9 +75,36 @@ final class PlanetObservatoryView: NSView {
     /// The two things a visitor cannot do for themselves: move, and wait.
     private let relandButton = PillButton(title: "Land somewhere else", symbol: "location")
     private let sleepButton = PillButton(title: "Sleep until sunrise", symbol: "moon.zzz")
-    private let placeCard = NSTextField(wrappingLabelWithString: "")
+    private let placeCard = SkyReadingLabel(wrappingLabelWithString: "")
+    private let dialGlass = DialGlassView()
+    private let hint = SkyReadingLabel(labelWithString: "Drag to look around · press the shutter")
+
+    // ---- chrome that gets out of the way -------------------------------
+    // The whole screen is one picture of a sky. Controls that hold full
+    // strength while you stare at it are the brightest objects in the frame
+    // and the eye keeps going back to them, so they retire a few seconds
+    // after your hand stops and return the instant it moves. The reading
+    // matter goes further back than the buttons do: you need the shutter
+    // findable, you do not need a paragraph about the planet.
+    private var dimControls: [NSView] = []
+    private var dimText: [NSView] = []
+    /// Labels whose colour comes from the palette, with the weight each is
+    /// drawn at. A text field's colour is a stored value rather than
+    /// something re-read at draw time, so the sun coming up has to come
+    /// round and repaint them by hand.
+    private var chromeLabels: [(NSTextField, CGFloat)] = []
+    /// What the place card last said, so it can be re-set in a new colour.
+    private var placeText = ""
+    private var chromeTimer: Timer?
+    private var chromeAwake = true
+    private var hasInteracted = false
 
     init(profile: StellarProfile, stars: [ObservatoryStar]) {
+        // You arrive at night, so the app arrives in red-light chrome. From
+        // here the light meter has the say: turn the planet into its day and
+        // the red goes with the dark, because it was only ever there to
+        // protect an eye that by then has nothing left to protect.
+        KidsStyle.nightVision = true
         sky = ObservatoryMetalView(stars: stars, profile: profile)
         let air = Atmosphere.forPlanet(name: profile.name)
         sky.atmosphere = air
@@ -61,7 +126,7 @@ final class PlanetObservatoryView: NSView {
         // The menu sits in the corner a phone puts its settings in, and the
         // saved-photo card drops in underneath it rather than over it.
         menuButton.translatesAutoresizingMaskIntoConstraints = false
-        menuButton.onPress = { [weak self] in self?.showSkyMenu() }
+        menuButton.onPress = { [weak self] in self?.wakeChrome(); self?.showSkyMenu() }
         addSubview(menuButton)
         toast.translatesAutoresizingMaskIntoConstraints = false
         addSubview(toast)
@@ -89,14 +154,12 @@ final class PlanetObservatoryView: NSView {
         let back = PillButton(title: "Back to the stars", symbol: "chevron.left")
         back.onTap = { [weak self] in self?.goBack() }
         back.setAccessibilityLabel("Leave the planet and return to the galaxy")
-        let title = NSTextField(labelWithString: "A night near \(profile.name)")
-        title.font = KidsStyle.font(25, .bold)
-        title.textColor = KidsStyle.ink
+        let title = SkyReadingLabel(labelWithString: "A night near \(profile.name)")
+        title.font = KidsStyle.font(20, .bold)
         let home = profile.galaxyName.isEmpty ? "this galaxy" : profile.galaxyName
-        let subtitle = NSTextField(labelWithString:
+        let subtitle = SkyReadingLabel(labelWithString:
             "Imagined planet · " + air.name + " air · sky from " + home)
-        subtitle.font = KidsStyle.font(12.5, .medium)
-        subtitle.textColor = KidsStyle.faint
+        subtitle.font = KidsStyle.font(11.5, .medium)
         let heading = NSStackView(views: [title, subtitle])
         heading.orientation = .vertical
         heading.alignment = .leading
@@ -120,6 +183,7 @@ final class PlanetObservatoryView: NSView {
         // container behind them.
         dial.onSelect = { [weak self] seconds in
             guard let self else { return }
+            self.handUsed()
             // Reaching for the dial mid-exposure is a decision: you are done
             // waiting. It used to change the number the plate was counting up
             // to while the plate itself kept filling, so the screen stayed
@@ -138,20 +202,20 @@ final class PlanetObservatoryView: NSView {
             self.sky.exposureSeconds = seconds
             self.shutter.needsDisplay = true
         }
-        shutter.onPress = { [weak self] in self?.toggleExposure() }
+        shutter.onPress = { [weak self] in self?.handUsed(); self?.toggleExposure() }
         focal.onChange = { [weak self] _, halfFovTan in
+            self?.handUsed()
             self?.sky.halfFovTan = halfFovTan
         }
         sky.halfFovTan = focal.currentHalfFovTan
 
         status.font = KidsStyle.font(12.5, .semibold)
-        status.textColor = KidsStyle.body
         status.alignment = .center
-        let hint = NSTextField(labelWithString:
-            "Drag to look around · press the shutter once · move while it is open for star trails")
-        hint.font = KidsStyle.font(11.5, .medium)
-        hint.textColor = KidsStyle.faint
+        // One line, and only until you have done it once. A permanent
+        // instruction is a permanent distraction.
+        hint.font = KidsStyle.font(11, .medium)
         hint.alignment = .center
+        chromeLabels = [(title, 1), (subtitle, 0.55), (status, 0.80), (hint, 0.45)]
 
         // Focal-length toggle sits to the left of the shutter, so the two
         // primary buttons are a thumb-swipe apart.
@@ -192,15 +256,23 @@ final class PlanetObservatoryView: NSView {
         placeCard.maximumNumberOfLines = 0
         placeCard.preferredMaxLayoutWidth = 360
         placeCard.setContentCompressionResistancePriority(.required, for: .vertical)
-        relandButton.onTap = { [weak self] in self?.relandPressed() }
-        sleepButton.onTap = { [weak self] in self?.sleepPressed() }
+        relandButton.onTap = { [weak self] in self?.handUsed(); self?.relandPressed() }
+        sleepButton.onTap = { [weak self] in self?.handUsed(); self?.sleepPressed() }
         relandButton.setAccessibilityLabel("Set the probe down somewhere else on this planet")
         sleepButton.setAccessibilityLabel("Let the planet turn until the star rises or sets")
-        let corner = NSStackView(views: [placeCard, relandButton, sleepButton])
+        // Always glyphs. Their titles change with the state ("Stop here" is
+        // short, "Sleep until sunrise" is not), and a control that swaps
+        // between a word and an icon is a control that moves under the thumb.
+        relandButton.iconOnlyOverLength = 0
+        sleepButton.iconOnlyOverLength = 0
+        let cornerButtons = NSStackView(views: [relandButton, sleepButton])
+        cornerButtons.orientation = .horizontal
+        cornerButtons.alignment = .centerY
+        cornerButtons.spacing = 10
+        let corner = NSStackView(views: [placeCard, cornerButtons])
         corner.orientation = .vertical
         corner.alignment = .leading
-        corner.spacing = 8
-        corner.setCustomSpacing(12, after: placeCard)
+        corner.spacing = 12
         corner.translatesAutoresizingMaskIntoConstraints = false
         addSubview(corner)
         NSLayoutConstraint.activate([
@@ -210,6 +282,29 @@ final class PlanetObservatoryView: NSView {
             corner.trailingAnchor.constraint(lessThanOrEqualTo: content.leadingAnchor,
                                              constant: -24),
         ])
+        // Behind the dial, not inside it: a layer's own drawing always sits
+        // under its sublayers, so a blur added to the dial would have been
+        // smeared over the scale instead of the sky.
+        addSubview(dialGlass, positioned: .below, relativeTo: content)
+        // Tied to the dial rather than measured against it once a layout.
+        // The face is a circle of 3.4 dial-heights, centred on the dial's
+        // own centre line and topped out at the dial's top edge -- state
+        // that, and the glass cannot drift when the stack above it shifts
+        // by a few points. It used to, and the two rims read as one arc
+        // slightly off another.
+        dialGlass.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            dialGlass.widthAnchor.constraint(equalTo: dial.heightAnchor, multiplier: 6.8),
+            dialGlass.heightAnchor.constraint(equalTo: dialGlass.widthAnchor),
+            dialGlass.centerXAnchor.constraint(equalTo: dial.centerXAnchor),
+            dialGlass.topAnchor.constraint(equalTo: dial.topAnchor),
+        ])
+
+        dimControls = [top, menuButton, cornerButtons, content, dialGlass]
+        dimText = [placeCard, hint]
+        paintChrome()
+        wakeChrome()
+
         sky.onTurnEnded = { [weak self] line in
             guard let self else { return }
             self.status.stringValue = line
@@ -218,6 +313,10 @@ final class PlanetObservatoryView: NSView {
 
         sky.onProgress = { [weak self] amount, moving, state in
             guard let self else { return }
+            // A hand on the glass, or a plate still filling: either way the
+            // person is using this screen and the chrome stays up.
+            if moving || state == .exposing { self.wakeChrome() }
+            self.applyNightVision()
             self.shutter.progress = CGFloat(amount)
             let open = state == .exposing
             if self.shutter.isExposing && !open {
@@ -309,10 +408,18 @@ final class PlanetObservatoryView: NSView {
         shutter.isExposing = false
         shutter.needsDisplay = true
         sleepButton.title = "Stop here"
+        sleepButton.symbolName = "stop.fill"
+        sleepButton.setAccessibilityLabel("Stop the planet turning where it is")
     }
 
+    /// The words live in the tooltip and the accessibility label now, so the
+    /// glyph has to carry the state change on its own: a waiting moon while
+    /// the ground is still, a stop square while it is turning.
     private func updateSleepTitle() {
         sleepButton.title = sky.starIsUp ? "Sleep until dark" : "Sleep until sunrise"
+        sleepButton.symbolName = "moon.zzz"
+        sleepButton.setAccessibilityLabel(
+            "Let the planet turn until the star " + (sky.starIsUp ? "sets" : "rises"))
     }
 
     /// Entry point for the auto-shoot diagnostic: a single press, exactly as
@@ -320,6 +427,78 @@ final class PlanetObservatoryView: NSView {
     private func takePhoto() { toggleExposure() }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Put the current palette on everything that stores a colour instead of
+    /// reading one. The controls draw themselves from the palette and only
+    /// need telling that it moved, which `KidsStyle.nightVision` does.
+    private func paintChrome() {
+        for (label, weight) in chromeLabels {
+            (label as? SkyReadingLabel)?.endReading()
+            label.toolTip = "Click to read in white; click again to return to red"
+            label.textColor = KidsStyle.chromeInk.withAlphaComponent(weight)
+        }
+        setPlaceCard(placeText)
+    }
+
+    /// Red light is worth its ugliness only while the sky is dark, and the
+    /// meter already knows. Standing in daylight the app looks like the rest
+    /// of the app; walk the planet round to night and it turns red.
+    private func applyNightVision() {
+        guard sky.isDark != KidsStyle.nightVision else { return }
+        KidsStyle.nightVision = sky.isDark
+        paintChrome()
+    }
+
+    override func layout() {
+        super.layout()
+    }
+
+    // MARK: - chrome that gets out of the way
+
+    /// Called by anything that counts as using the screen. Brings the chrome
+    /// back and restarts the clock.
+    func wakeChrome() {
+        chromeTimer?.invalidate()
+        if !chromeAwake {
+            chromeAwake = true
+            fadeChrome(controls: 1, text: 1, over: 0.18)
+        }
+        chromeTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) {
+            [weak self] _ in self?.retireChrome()
+        }
+    }
+
+    private func retireChrome() {
+        guard chromeAwake else { return }
+        chromeAwake = false
+        // Slow on the way out so it reads as the screen settling rather than
+        // as something vanishing.
+        fadeChrome(controls: 0.42, text: 0.10, over: 1.2)
+    }
+
+    private func fadeChrome(controls: CGFloat, text: CGFloat, over: TimeInterval) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = over
+            ctx.allowsImplicitAnimation = true
+            for v in dimControls { v.animator().alphaValue = controls }
+            for v in dimText { v.animator().alphaValue = text }
+        }
+    }
+
+    /// Anything the hand actually pressed. Also retires the one-line hint:
+    /// you have now done the thing it was telling you to do.
+    private func handUsed() {
+        if !hasInteracted {
+            hasInteracted = true
+            dimText.removeAll { $0 === hint }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.9
+                hint.animator().alphaValue = 0
+            }
+        }
+        wakeChrome()
+    }
+
     override var acceptsFirstResponder: Bool { true }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -421,25 +600,78 @@ final class PlanetObservatoryView: NSView {
         tuningPanel = panel
         status.stringValue = "Engineering panel open · press E to hide it"
     }
-    func stop() { sky.isPaused = true; sky.onProgress = nil }
+    func stop() {
+        sky.isPaused = true
+        sky.onProgress = nil
+        chromeTimer?.invalidate()
+        chromeTimer = nil
+        KidsStyle.nightVision = false
+    }
     var exposureProgress: Float { sky.progressFraction }
     var renderError: String? { sky.renderError }
     /// MTK display callbacks may not run inside the synchronous UI-review
     /// harness. Explicitly render and wait for a real GPU frame before capture.
     private func setPlaceCard(_ text: String) {
+        placeCard.endReading()
+        placeCard.toolTip = "Click to read in white; click again to return to red"
+        placeText = text
         let cardStyle = NSMutableParagraphStyle()
         cardStyle.lineSpacing = 2.5
         placeCard.attributedStringValue = NSAttributedString(
             string: text,
             attributes: [.font: KidsStyle.font(11.5, .medium),
-                         .foregroundColor: KidsStyle.body,
+                         .foregroundColor: KidsStyle.chromeInk.withAlphaComponent(0.66),
                          .paragraphStyle: cardStyle])
+    }
+
+    /// Whether the frosted disc still sits exactly on the face the dial
+    /// draws. Two circles of the same size a few points apart read as a
+    /// double rim, which is what a drifting glass looked like.
+    var reviewReadingToggle: Bool {
+        guard let label = chromeLabels.first?.0 as? SkyReadingLabel else { return false }
+        let original = label.attributedStringValue
+        let color = label.textColor
+        label.toggleReading()
+        let becameWhite = label.isReading && label.textColor == NSColor.white
+        label.toggleReading()
+        let restored = !label.isReading && label.textColor == color
+            && label.attributedStringValue.isEqual(to: original)
+        let card = placeCard.attributedStringValue
+        placeCard.toggleReading()
+        let cardWhite = placeCard.isReading && placeCard.textColor == NSColor.white
+        placeCard.toggleReading()
+        return becameWhite && restored && cardWhite
+            && placeCard.attributedStringValue.isEqual(to: card)
+    }
+
+    var reviewGlassOnFace: Bool {
+        let want = convert(dial.faceRect, from: dial)
+        let got = dialGlass.frame
+        return abs(want.minX - got.minX) < 0.5 && abs(want.minY - got.minY) < 0.5
+            && abs(want.width - got.width) < 0.5 && abs(want.height - got.height) < 0.5
+    }
+
+    /// Every pill the review is allowed to poke at, found by walking the
+    /// tree rather than by listing them here -- a hand-written list stops
+    /// testing the day somebody adds a button.
+    var reviewTouchTargets: [PillButton] {
+        var found: [PillButton] = []
+        var queue = subviews
+        while let v = queue.popLast() {
+            if let pill = v as? PillButton, !pill.isHidden { found.append(pill) }
+            queue.append(contentsOf: v.subviews)
+        }
+        return found
     }
 
     @discardableResult
     func reviewDraw() -> Bool {
+        // Screenshots want the chrome at full strength; a review run takes
+        // longer than the fade-out clock.
+        wakeChrome()
         layoutSubtreeIfNeeded()
         let result = sky.drawForReview()
+        applyNightVision()
         dial.autoSeconds = sky.autoShutter
         progress.doubleValue = Double(sky.progressFraction)
         status.stringValue = sky.progressFraction >= 1 ? "The sky is yours. Take your time."
@@ -652,6 +884,18 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// same linear units the plate integrates. Zero means "not yet read".
     private var meterKey: Float = 0
 
+    /// Dark enough that a lit screen would cost you the sky.
+    ///
+    /// Not "the sun is down": the twilight after sunset is still bright
+    /// enough to read by, and on a world that receives half a percent of
+    /// Earth's daylight the whole *day* meters darker than our dusk. The
+    /// meter is the honest instrument here -- it is already measuring the
+    /// light falling on this landscape -- so the question is simply what
+    /// exposure the scene is asking for. Latched on the same two lines the
+    /// shutter uses, so the chrome cannot flicker between red and blue while
+    /// the view drifts past a bright horizon.
+    private(set) var isDark = true
+
     /// Whether the meter is holding the shutter. Latched, with the two lines
     /// above for edges: it takes over when the light asks for a speed the
     /// dial has not got, and does not let go until the light has fallen far
@@ -681,6 +925,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         guard let wanted = meteredSeconds else { autoHolds = false; return }
         if wanted < Self.dialFloorSeconds { autoHolds = true }
         else if wanted > Self.dialReturnSeconds { autoHolds = false }
+        isDark = isDark ? wanted > Self.dialFloorSeconds : wanted >= Self.dialReturnSeconds
     }
 
     /// The shutter the light is asking for, or nil while the dial is still in
@@ -2762,6 +3007,11 @@ final class ExposureDial: NSView {
     /// is shallow and the labels stay readable.
     private var radius: CGFloat { bounds.height * 3.4 }
     private var centre: NSPoint { NSPoint(x: bounds.midX, y: bounds.maxY - radius) }
+    /// The disc the face occupies, in the dial's own coordinates. Most of it
+    /// is below the view: only the top of the ring shows.
+    var faceRect: NSRect {
+        NSRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2)
+    }
     /// Degrees of arc per doubling of exposure time.
     private let degreesPerStop: CGFloat = 11
 
@@ -2843,15 +3093,16 @@ final class ExposureDial: NSView {
         // edge of a ring rather than a flat strip. Glassy — the sky reads
         // faintly through it, and a soft radial highlight suggests a curved
         // piece of dark glass rather than a painted plate.
-        let faceRect = NSRect(x: centre.x - rim, y: centre.y - rim,
-                              width: rim * 2, height: rim * 2)
         let face = NSBezierPath(ovalIn: faceRect)
         ctx.saveGState()
         face.addClip()
+        // Smoked, not frosted. A white wash at any alpha is a grey disc
+        // hanging in a black sky; black at a low alpha is invisible at night
+        // and still holds the scale up against a bright horizon by day.
         if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
                                  colors: [
-                                    NSColor(calibratedWhite: 0.20, alpha: 0.55).cgColor,
-                                    NSColor(calibratedWhite: 0.05, alpha: 0.68).cgColor,
+                                    NSColor(calibratedWhite: 0, alpha: 0.18).cgColor,
+                                    NSColor(calibratedWhite: 0, alpha: 0.55).cgColor,
                                  ] as CFArray,
                                  locations: [0, 1]) {
             let top = NSPoint(x: centre.x, y: centre.y + rim)
@@ -2860,7 +3111,7 @@ final class ExposureDial: NSView {
         }
         ctx.restoreGState()
         // Bright inner rim so the arc still reads against a dim sky.
-        NSColor.white.withAlphaComponent(0.22).setStroke()
+        KidsStyle.lamp(1, alpha: 0.22).setStroke()
         face.lineWidth = 1
         face.stroke()
 
@@ -2874,7 +3125,7 @@ final class ExposureDial: NSView {
                 let len: CGFloat = isMajor ? 15 : 8
                 let fade = 1 - Double(abs(th) / 0.62)
                 let alpha = (isMajor ? 0.85 : 0.35) * (0.25 + 0.75 * fade) * dim
-                NSColor.white.withAlphaComponent(alpha).setStroke()
+                KidsStyle.lamp(1, alpha: alpha).setStroke()
                 let path = NSBezierPath()
                 path.move(to: point(th, rim - 4))
                 path.line(to: point(th, rim - 4 - len))
@@ -2902,8 +3153,8 @@ final class ExposureDial: NSView {
             let f = KidsStyle.font(selected ? 19 : 15, selected ? .bold : .medium)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: f,
-                .foregroundColor: (selected ? NSColor(calibratedRed: 1, green: 0.78, blue: 0.20, alpha: 1)
-                                            : NSColor.white).withAlphaComponent(alpha)]
+                .foregroundColor: (selected ? KidsStyle.readout
+                                            : KidsStyle.lamp(1)).withAlphaComponent(alpha)]
             let size = text.size(withAttributes: attrs)
             text.draw(at: NSPoint(x: -size.width / 2, y: -size.height / 2), withAttributes: attrs)
 
@@ -2911,7 +3162,7 @@ final class ExposureDial: NSView {
                 let n = stop.note.uppercased() as NSString
                 let na: [NSAttributedString.Key: Any] = [
                     .font: KidsStyle.font(8.5, .semibold),
-                    .foregroundColor: NSColor.white.withAlphaComponent(alpha * 0.42)]
+                    .foregroundColor: KidsStyle.lamp(1, alpha: alpha * 0.42)]
                 let ns = n.size(withAttributes: na)
                 n.draw(at: NSPoint(x: -ns.width / 2, y: -size.height / 2 - 12), withAttributes: na)
             }
@@ -2925,12 +3176,12 @@ final class ExposureDial: NSView {
         tri.line(to: NSPoint(x: tip.x - 6, y: tip.y + 2))
         tri.line(to: NSPoint(x: tip.x + 6, y: tip.y + 2))
         tri.close()
-        NSColor(calibratedRed: 1, green: 0.78, blue: 0.20, alpha: CGFloat(dim)).setFill()
+        KidsStyle.readout.withAlphaComponent(CGFloat(dim)).setFill()
         tri.fill()
 
         // The reading is the speed the shutter will actually use, which is
         // the dial's unless the light has taken it away.
-        let amber = NSColor(calibratedRed: 1, green: 0.78, blue: 0.20, alpha: 1)
+        let amber = KidsStyle.readout
         let used = autoSeconds ?? Float(seconds)
         let value = (ObservatoryMetalView.speedText(used) + " s") as NSString
         let va: [NSAttributedString.Key: Any] = [
@@ -2956,6 +3207,50 @@ final class ExposureDial: NSView {
                      withAttributes: ta)
         }
     }
+}
+
+/// Frosted glass under the exposure dial. The dial is a big disc of dark
+/// glass laid over the sky; blurring what is behind it is what makes it read
+/// as glass rather than as a hole cut in the picture, and it stops the stars
+/// under the scale from competing with the numbers printed on it.
+private final class DialGlassView: NSView {
+    /// `NSVisualEffectView` rather than a `CIGaussianBlur` in
+    /// `backgroundFilters`: the filter route is quietly ignored once the
+    /// thing behind the layer is a `CAMetalLayer`, which here it always is.
+    private let frosted = NSVisualEffectView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        frosted.blendingMode = .withinWindow      // blur the sky, not the desktop
+        frosted.material = .hudWindow
+        frosted.state = .active
+        frosted.appearance = NSAppearance(named: .darkAqua)
+        frosted.wantsLayer = true
+        frosted.layer?.masksToBounds = true
+        // Every material carries a tint, and a tint over a night sky is
+        // milk. Measured against black, `.hudWindow` lifts the picture by
+        // sRGB 0.101 -- linear 0.0102 -- so the layer subtracts exactly that
+        // much back off. The lift is a constant, so taking it away leaves
+        // black where the sky was black and keeps the blurred light that is
+        // actually there: a bright horizon behind the disc loses about 7% of
+        // its brightness, a dark sky loses all of the milk.
+        let clear = CIFilter(name: "CIColorMatrix")
+        clear?.setValue(CIVector(x: -0.0102, y: -0.0102, z: -0.0102, w: 0),
+                        forKey: "inputBiasVector")
+        frosted.layer?.filters = clear.map { [$0] }
+        addSubview(frosted)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        frosted.frame = bounds
+        // Square by construction, so a corner radius of half the side is a
+        // circle -- cheaper than a shape mask and it follows the frame.
+        frosted.layer?.cornerRadius = bounds.width / 2
+    }
+    /// Purely decorative: the dial above it owns every touch in this area.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// Round shutter button with the exposure drawn as a ring around it.
@@ -3010,7 +3305,7 @@ final class ShutterButton: NSView {
         let r = bounds.insetBy(dx: 3, dy: 3)
 
         // outer ring: the track
-        NSColor.white.withAlphaComponent(0.22).setStroke()
+        KidsStyle.lamp(1, alpha: 0.22).setStroke()
         let track = NSBezierPath(ovalIn: r)
         track.lineWidth = 3
         track.stroke()
@@ -3023,7 +3318,8 @@ final class ShutterButton: NSView {
                            startAngle: 90,
                            endAngle: 90 - 360 * Double(min(progress, 1)),
                            clockwise: true)
-            NSColor(calibratedRed: 0.55, green: 0.80, blue: 1, alpha: 0.95).setStroke()
+            (KidsStyle.nightVision ? KidsStyle.accentOnNight
+                : NSColor(calibratedRed: 0.55, green: 0.80, blue: 1, alpha: 0.95)).setStroke()
             path.lineWidth = 3
             path.stroke()
         }
@@ -3034,13 +3330,13 @@ final class ShutterButton: NSView {
         let inner = r.insetBy(dx: 9 + squeeze, dy: 9 + squeeze)
         let base: CGFloat = isHeld ? 0.72 : 0.88
         let white = base + 0.12 * flashAmount
-        NSColor(calibratedWhite: white, alpha: 1).setFill()
+        KidsStyle.lamp(white).setFill()
         if isExposing {
             // A rounded stop square while the plate is filling: the same
             // press that started it will end it.
             let stop = inner.insetBy(dx: inner.width * 0.22, dy: inner.height * 0.22)
             NSBezierPath(roundedRect: stop, xRadius: 3, yRadius: 3).fill()
-            NSColor(calibratedWhite: white, alpha: 0.30).setStroke()
+            KidsStyle.lamp(white, alpha: 0.30).setStroke()
             let ring = NSBezierPath(ovalIn: inner)
             ring.lineWidth = 2
             ring.stroke()
@@ -3078,25 +3374,25 @@ final class FocalLengthToggle: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds.insetBy(dx: 3, dy: 3)
-        NSColor.white.withAlphaComponent(0.20).setStroke()
+        KidsStyle.lamp(1, alpha: 0.20).setStroke()
         let ring = NSBezierPath(ovalIn: r)
         ring.lineWidth = 1.5
         ring.stroke()
         let inner = r.insetBy(dx: 5, dy: 5)
-        NSColor(calibratedWhite: 0.08, alpha: 0.72).setFill()
+        KidsStyle.lamp(0.08, alpha: 0.72).setFill()
         NSBezierPath(ovalIn: inner).fill()
 
         let label = "\(currentMM)" as NSString
         let a: [NSAttributedString.Key: Any] = [
             .font: KidsStyle.font(15.5, .bold),
-            .foregroundColor: NSColor(calibratedWhite: 0.92, alpha: 1)]
+            .foregroundColor: KidsStyle.lamp(0.92)]
         let sz = label.size(withAttributes: a)
         label.draw(at: NSPoint(x: bounds.midX - sz.width / 2,
                                y: bounds.midY - sz.height / 2 - 4), withAttributes: a)
         let unit = "mm" as NSString
         let ua: [NSAttributedString.Key: Any] = [
             .font: KidsStyle.font(8.5, .medium),
-            .foregroundColor: NSColor(calibratedWhite: 0.55, alpha: 1)]
+            .foregroundColor: KidsStyle.lamp(0.55)]
         let uz = unit.size(withAttributes: ua)
         unit.draw(at: NSPoint(x: bounds.midX - uz.width / 2,
                               y: bounds.midY + sz.height / 2 - 6), withAttributes: ua)
@@ -3129,7 +3425,7 @@ private final class PhotoToast: NSView {
         frameView.layer?.cornerRadius = 8
         frameView.layer?.masksToBounds = true
         frameView.layer?.borderWidth = 1
-        frameView.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        frameView.layer?.borderColor = KidsStyle.lamp(1, alpha: 0.22).cgColor
         frameView.layer?.backgroundColor = NSColor.black.cgColor
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -3142,7 +3438,7 @@ private final class PhotoToast: NSView {
         ])
 
         caption.font = KidsStyle.font(11.5, .semibold)
-        caption.textColor = NSColor(calibratedWhite: 0.92, alpha: 1)
+        caption.textColor = KidsStyle.chromeInk
         caption.alignment = .center
 
         let stack = NSStackView(views: [frameView, caption])

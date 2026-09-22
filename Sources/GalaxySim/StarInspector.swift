@@ -10,21 +10,21 @@ import MetalKit
 /// and the galaxy picker. Clicking a star used to age the app by a decade,
 /// and the type was the largest part of why.
 enum StarCardStyle {
-    static let accent = KidsStyle.accentOnNight
+    static var accent: NSColor { KidsStyle.accentOnNight }
     static let ink = KidsStyle.ink
     static let body = KidsStyle.body
     static let faint = KidsStyle.faint
     static let panel = KidsStyle.panel
     static let hairline = KidsStyle.hairline
     static let corner: CGFloat = 14
-    static let sectionFont = KidsStyle.font(10.5, .heavy)
-    static let bodyFont = KidsStyle.font(12.5, .regular)
+    static let sectionFont = KidsStyle.font(13, .heavy)
+    static let bodyFont = KidsStyle.font(15, .regular)
     /// Rounded rather than monospaced-digit. The values here are short
     /// sentences ("83× smaller than our Sun"), not a column of figures, so
     /// the alignment monospacing buys was never visible — and rounded
     /// digits are what the rest of the app uses.
-    static let valueFont = KidsStyle.font(13.5, .semibold)
-    static let tinyFont = KidsStyle.font(9.5, .medium)
+    static let valueFont = KidsStyle.font(14, .semibold)
+    static let tinyFont = KidsStyle.font(12, .medium)
 
     static func sectionLabel(_ text: String) -> NSTextField {
         NSTextField(labelWithAttributedString: NSAttributedString(
@@ -91,7 +91,11 @@ enum StarCardStyle {
 final class StarInspectorView: NSView {
     var onClose: (() -> Void)?
     var onVisitPlanet: (() -> Void)?
-    private let scroll = NSScrollView()
+    private let tabs = [PillButton(title: "Star", symbol: "sparkles"),
+                        PillButton(title: "Life", symbol: "heart.fill"),
+                        PillButton(title: "Family", symbol: "star.fill")]
+    private var page = 0
+    private let portraitHint = NSTextField(labelWithString: "Tap the star to compare with our Sun")
     private let content = InspectorFlippedView()
     private let heading = NSTextField(labelWithString: "THE STAR YOU PICKED")
     private let nameLabel = NSTextField(labelWithString: "")
@@ -100,7 +104,6 @@ final class StarInspectorView: NSView {
     private let statsHeader = StarCardStyle.sectionLabel("By the numbers")
     private let hrHeader = StarCardStyle.sectionLabel("The star family")
     private let storyHeader = StarCardStyle.sectionLabel("Its life story")
-    private let compare = SunComparisonView(frame: .zero)
     private let stats = StatTableView(frame: .zero)
     private let story = NSTextField(wrappingLabelWithString: "")
     private let disclaimer = NSTextField(wrappingLabelWithString: StarInspectorView.disclaimerText(galaxy: ""))
@@ -111,7 +114,7 @@ final class StarInspectorView: NSView {
         let where_ = galaxy.isEmpty ? "this part of the galaxy" : galaxy
         return "An example star for \(where_). Its name, its age and its future are illustrative, not measured."
     }
-    private let closeButton = ChunkyButton(manualSize: NSSize(width: 36, height: 36))
+    private let closeButton = ChunkyButton(manualSize: NSSize(width: 44, height: 44))
     private let landButton = LandButtonView(frame: .zero)
     private let portrait = StellarPortraitView(frame: .zero)
     private let hr = StellarHRView(frame: .zero)
@@ -124,24 +127,33 @@ final class StarInspectorView: NSView {
         layer?.cornerRadius = 18
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.documentView = content
-        addSubview(scroll)
+        addSubview(content)
+        for (index, tab) in tabs.enumerated() {
+            tab.horizontalPadding = 8
+            tab.onTap = { [weak self] in self?.page = index; self?.needsLayout = true }
+            addSubview(tab)
+        }
+        portraitHint.font = KidsStyle.font(12, .medium)
+        portraitHint.textColor = KidsStyle.accentOnNight
+        portraitHint.alignment = .center
+        portrait.onComparison = { [weak self] showing in
+            self?.portraitHint.stringValue = showing
+                ? "Dotted Sun · same scale · tap to return"
+                : "Tap the star to compare with our Sun"
+        }
+        content.addSubview(portraitHint)
         heading.font = StarCardStyle.sectionFont
         heading.textColor = StarCardStyle.accent
         nameLabel.font = KidsStyle.font(26, .bold)
         nameLabel.textColor = StarCardStyle.ink
-        typeLabel.font = KidsStyle.font(12.5, .medium)
+        typeLabel.font = KidsStyle.font(14, .medium)
         typeLabel.textColor = StarCardStyle.faint
         stats.toolTip = "Brightness means total light emitted compared with the Sun, not how bright it looks from far away."
-        compare.toolTip = "Both discs are drawn to the same scale, each in its own true colour. Our Sun is white, not yellow -- it only looks yellow after Earth's air scatters the blue out of it."
         story.font = StarCardStyle.bodyFont
         story.textColor = StarCardStyle.body
         disclaimer.font = StarCardStyle.tinyFont
         disclaimer.textColor = NSColor.white.withAlphaComponent(0.42)
-        for view in [portrait, compare, stats, hr, sizeHeader, statsHeader, hrHeader, storyHeader, story, disclaimer] as [NSView] {
+        for view in [portrait, stats, hr, sizeHeader, statsHeader, hrHeader, storyHeader, story, disclaimer] as [NSView] {
             content.addSubview(view)
         }
         for view in [heading, nameLabel, typeLabel] { addSubview(view) }
@@ -158,7 +170,26 @@ final class StarInspectorView: NSView {
         setAccessibilityLabel("Selected star explorer")
     }
     required init?(coder: NSCoder) { fatalError() }
-    func setAnimating(_ enabled: Bool) { portrait.isPlaying = enabled; portrait.rendersContinuously = enabled }
+
+    // A press that lands on the card stops at the card. An unhandled mouse
+    // event walks up the responder chain and ends at the sky, whose click
+    // handler reads "no star under the pointer" as "put the card away" --
+    // so poking at the card's own background used to close it.
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {}
+    override func mouseDragged(with event: NSEvent) {}
+
+    private var animationEnabled = false
+    func setAnimating(_ enabled: Bool) {
+        animationEnabled = enabled
+        portrait.isPlaying = enabled && page == 0
+    }
+    func reviewPage(_ index: Int) { tabs[index].simulateTap(); layoutSubtreeIfNeeded() }
+    func reviewComparison() { portrait.toggleComparison() }
+    func reviewDrawPortrait() { if page == 0 { portrait.draw() } }
+    var reviewContentFits: Bool {
+        content.subviews.filter { !$0.isHidden }.allSatisfy { content.bounds.contains($0.frame) }
+    }
 
     func update(profile: StellarProfile) {
         nameLabel.stringValue = profile.name
@@ -181,8 +212,7 @@ final class StarInspectorView: NSView {
         // that answer changes meaning as the two discs mix, which is worth a
         // child noticing.
         if !profile.galaxyName.isEmpty { stats.rows.append(("Home galaxy", profile.galaxyName)) }
-        compare.profile = profile
-        landButton.tint = profile.color
+        landButton.tint = KidsStyle.accent
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 2
         paragraph.paragraphSpacing = 6
@@ -191,6 +221,7 @@ final class StarInspectorView: NSView {
             attributes: [.font: StarCardStyle.bodyFont,
                          .foregroundColor: StarCardStyle.body,
                          .paragraphStyle: paragraph])
+        portraitHint.stringValue = "Tap the star to compare with our Sun"
         portrait.setProfile(profile)
         hr.temperature = profile.temperature
         hr.luminosity = profile.solarLuminosity
@@ -200,68 +231,38 @@ final class StarInspectorView: NSView {
 
     override func layout() {
         super.layout()
-        let w = max(230, bounds.width - 40)
-        // Identity and the one big action stay put; everything else scrolls.
-        heading.frame = NSRect(x: 20, y: 16, width: w - 25, height: 14)
-        // Names are no longer all the same length -- "Vega" and
-        // "2MASS J1442-3515" share this line -- so the big type shrinks to fit
-        // rather than truncating somebody's star to "2MASS J144...".
-        let fitted = [26, 22, 19, 16].first { size in
-            nameLabel.stringValue.size(withAttributes:
-                [.font: KidsStyle.font(CGFloat(size), .bold)]).width <= w
-        } ?? 16
-        if nameLabel.font?.pointSize != CGFloat(fitted) {
-            nameLabel.font = KidsStyle.font(CGFloat(fitted), .bold)
+        portrait.isPlaying = animationEnabled && page == 0
+        let w = bounds.width - 32
+        heading.frame = NSRect(x: 16, y: 12, width: w - 48, height: 18)
+        nameLabel.font = KidsStyle.font(23, .bold)
+        nameLabel.frame = NSRect(x: 16, y: 32, width: w - 42, height: 30)
+        typeLabel.frame = NSRect(x: 16, y: 64, width: w, height: 20)
+        closeButton.frame = NSRect(x: bounds.width - 56, y: 12, width: 44, height: 44)
+        for (index, tab) in tabs.enumerated() {
+            tab.frame = NSRect(x: 16 + CGFloat(index) * (w + 8) / 3, y: 94,
+                               width: (w - 16) / 3, height: 44)
+            tab.isProminent = page == index
         }
-        nameLabel.frame = NSRect(x: 20, y: 33, width: w, height: 30)
-        typeLabel.frame = NSRect(x: 20, y: 64, width: w, height: 17)
-        closeButton.frame = NSRect(x: bounds.width - 46, y: 12, width: 36, height: 36)
-        let buttonHeight: CGFloat = 50
-        landButton.frame = NSRect(x: 16, y: bounds.height - buttonHeight - 14,
-                                  width: bounds.width - 32, height: buttonHeight)
-        let top: CGFloat = 90
-        let scrollHeight = max(1, bounds.height - top - buttonHeight - 26)
-        scroll.frame = NSRect(x: 1, y: top, width: bounds.width - 2, height: scrollHeight)
-        let cw = bounds.width - 2
-        content.frame = NSRect(x: 0, y: 0, width: cw, height: 100)
-        // Every block is measured and stacked, so nothing can be clipped by a
-        // hardcoded height the way the story block used to be.
-        func header(_ label: NSTextField, _ y: CGFloat) -> CGFloat {
-            label.frame = NSRect(x: 20, y: y, width: w, height: 14)
-            return y + 19
+        landButton.frame = NSRect(x: 16, y: bounds.height - 66, width: w, height: 52)
+        content.frame = NSRect(x: 0, y: 148, width: bounds.width, height: bounds.height - 222)
+        for v in [sizeHeader, statsHeader, hrHeader, storyHeader, disclaimer] { v.isHidden = true }
+        portrait.isHidden = page != 0
+        portraitHint.isHidden = page != 0
+        stats.isHidden = page != 0
+        story.isHidden = page != 1
+        hr.isHidden = page != 2
+        let ph = max(90, min(170, content.bounds.height - stats.fittingHeight - 28))
+        portrait.frame = NSRect(x: 16, y: 0, width: w, height: ph)
+        portraitHint.frame = NSRect(x: 16, y: ph + 2, width: w, height: 20)
+        stats.frame = NSRect(x: 16, y: ph + 26, width: w, height: stats.fittingHeight)
+        story.frame = NSRect(x: 16, y: 8, width: w, height: content.bounds.height - 70)
+        hr.frame = NSRect(x: 16, y: 0, width: w, height: min(240, content.bounds.height - 64))
+        if page != 0 {
+            disclaimer.isHidden = false
+            disclaimer.frame = NSRect(x: 16, y: content.bounds.height - 60, width: w, height: 60)
         }
-        func measured(_ field: NSTextField) -> CGFloat {
-            field.attributedStringValue.boundingRect(
-                with: NSSize(width: w, height: 4000),
-                options: [.usesLineFragmentOrigin, .usesFontLeading]).height.rounded(.up) + 6
-        }
-        var y: CGFloat = 2
-        // On a short window the portrait would fill the whole visible area and
-        // hide the fact that anything follows it, so it gives ground first. It
-        // keeps a fixed 1.7 frame while it shrinks: the portrait renderer maps
-        // the star into the drawable, so a frame that changes shape changes how
-        // round the star looks, and a star that is round on one window and oval
-        // on another is just a bug with extra steps.
-        let portraitHeight = min(176, max(112, scrollHeight * 0.40)).rounded()
-        let portraitWidth = min(cw - 20, portraitHeight * 1.7).rounded()
-        portrait.frame = NSRect(x: ((cw - portraitWidth) / 2).rounded(), y: y,
-                                width: portraitWidth, height: portraitHeight)
-        y = portrait.frame.maxY + 14
-        y = header(sizeHeader, y)
-        compare.frame = NSRect(x: 18, y: y, width: cw - 36, height: 164)
-        y = compare.frame.maxY + 18
-        y = header(statsHeader, y)
-        stats.frame = NSRect(x: 18, y: y, width: cw - 36, height: stats.fittingHeight)
-        y = stats.frame.maxY + 18
-        y = header(hrHeader, y)
-        hr.frame = NSRect(x: 18, y: y, width: cw - 36, height: 186)
-        y = hr.frame.maxY + 18
-        y = header(storyHeader, y)
-        story.frame = NSRect(x: 20, y: y, width: w, height: measured(story))
-        y = story.frame.maxY + 14
-        disclaimer.frame = NSRect(x: 20, y: y, width: w, height: measured(disclaimer))
-        content.frame.size.height = disclaimer.frame.maxY + 16
     }
+
 }
 
 private final class InspectorFlippedView: NSView { override var isFlipped: Bool { true } }
@@ -290,72 +291,6 @@ private final class StatTableView: NSView {
     }
 }
 
-/// The Sun and the selected star drawn side by side at one shared scale, which
-/// is the comparison the numbers alone cannot make. The two discs are always in
-/// true proportion to each other; when one of them works out smaller than a few
-/// pixels it is drawn as a minimum-size dot and the view says so, rather than
-/// quietly cheating the scale to make it visible.
-private final class SunComparisonView: NSView {
-    var profile: StellarProfile? { didSet { needsDisplay = true } }
-    override var isFlipped: Bool { true }
-
-    override func draw(_ dirtyRect: NSRect) {
-        StarCardStyle.panelBackground(bounds)
-        guard let profile else { return }
-        let ratio = max(profile.solarRadius, 1e-6)
-        let headline: String
-        if ratio > 1.08 { headline = "This star is \(StarCardStyle.times(ratio)) wider than our Sun" }
-        else if ratio < 0.93 { headline = "Our Sun is \(StarCardStyle.times(1 / ratio)) wider than this star" }
-        else { headline = "This star is almost exactly Sun-sized" }
-        StarCardStyle.draw(headline, at: NSPoint(x: bounds.midX, y: 11),
-                           font: KidsStyle.font(11.5, .semibold),
-                           color: StarCardStyle.ink, align: .center)
-
-        let baseline = bounds.height - 34
-        let largest = min(bounds.width * 0.42, baseline - 46)
-        let scale = largest / max(1.0, ratio)
-        let minimum: CGFloat = 4
-        let sunSize = max(minimum, scale)
-        let starSize = max(minimum, scale * CGFloat(ratio))
-        if sunSize == minimum || starSize == minimum {
-            StarCardStyle.draw("the little one is a dot — at true scale you could not see it",
-                               at: NSPoint(x: bounds.midX, y: 27),
-                               font: KidsStyle.font(9, .medium), color: StarCardStyle.faint, align: .center)
-        }
-        // The Sun gets the same blackbody treatment as every other star on the
-        // card, so a solar twin really does look identical beside it. That means
-        // it comes out white rather than the storybook yellow: the yellow is
-        // Earth's atmosphere scattering the blue away, not the Sun's colour.
-        let sunRGB = Relativity.blackbodyRGB(5772)
-        let sunPeak = max(sunRGB.x, max(sunRGB.y, sunRGB.z))
-        let sunColor = NSColor(srgbRed: CGFloat(sunRGB.x / sunPeak), green: CGFloat(sunRGB.y / sunPeak),
-                               blue: CGFloat(sunRGB.z / sunPeak), alpha: 1)
-        disc(NSPoint(x: bounds.width * 0.29, y: baseline - sunSize / 2), sunSize, sunColor)
-        disc(NSPoint(x: bounds.width * 0.71, y: baseline - starSize / 2), starSize, profile.color)
-        StarCardStyle.draw("our Sun", at: NSPoint(x: bounds.width * 0.29, y: baseline + 8),
-                           font: StarCardStyle.tinyFont, color: StarCardStyle.faint, align: .center)
-        StarCardStyle.draw("this star", at: NSPoint(x: bounds.width * 0.71, y: baseline + 8),
-                           font: StarCardStyle.tinyFont, color: StarCardStyle.body, align: .center)
-    }
-
-    /// A lit sphere rather than a flat circle: soft halo, then a body shaded
-    /// from an off-centre highlight so it reads as round at any size.
-    private func disc(_ centre: NSPoint, _ size: CGFloat, _ color: NSColor) {
-        let radius = size / 2
-        StarCardStyle.glow(at: centre, radius: radius * 2.1, color: color, strength: 0.42)
-        let body = NSBezierPath(ovalIn: NSRect(x: centre.x - radius, y: centre.y - radius,
-                                               width: size, height: size))
-        let bright = NSColor(calibratedRed: min(1, color.redComponent * 0.45 + 0.55),
-                             green: min(1, color.greenComponent * 0.45 + 0.55),
-                             blue: min(1, color.blueComponent * 0.45 + 0.55), alpha: 1)
-        NSGradient(colors: [bright, color, color.blended(withFraction: 0.45, of: .black) ?? color])?
-            .draw(in: body, relativeCenterPosition: NSPoint(x: -0.3, y: -0.35))
-    }
-}
-
-/// The primary action. It used to be a stock rounded push button reading
-/// "Watch its night sky", which looked like an OK/Cancel and invited nobody to
-/// press it. Now it is a warm planet-shaped invitation in the star's own colour.
 private final class LandButtonView: NSView {
     var action: (() -> Void)?
     var tint: NSColor = .systemTeal { didSet { needsDisplay = true } }
@@ -388,9 +323,8 @@ private final class LandButtonView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let lift: CGFloat = pressing ? 0.0 : (hovering ? 0.10 : 0.05)
         let shape = NSBezierPath(roundedRect: bounds, xRadius: 16, yRadius: 16)
-        let top = NSColor(calibratedRed: 1.00, green: 0.76 + lift * 0.3, blue: 0.40, alpha: 1)
-        let bottom = NSColor(calibratedRed: 0.95, green: 0.47 + lift * 0.2, blue: 0.29, alpha: 1)
-        NSGradient(starting: top, ending: bottom)?.draw(in: shape, angle: -90)
+        KidsStyle.button(lift).setFill()
+        shape.fill()
         NSColor.white.withAlphaComponent(pressing ? 0.10 : 0.28).setStroke()
         shape.lineWidth = 1
         shape.stroke()
@@ -415,11 +349,11 @@ private final class LandButtonView: NSView {
         ring.stroke()
         NSGraphicsContext.restoreGraphicsState()
 
-        let ink = NSColor(calibratedRed: 0.17, green: 0.07, blue: 0.03, alpha: 1)
+        let ink = KidsStyle.ink
         StarCardStyle.draw("Land on the planet", at: NSPoint(x: 58, y: bounds.midY - 14),
                            font: KidsStyle.font(15.5, .bold), color: ink)
         StarCardStyle.draw("stand there and look up at the sky", at: NSPoint(x: 58, y: bounds.midY + 3),
-                           font: KidsStyle.font(10.5, .medium),
+                           font: KidsStyle.font(12, .medium),
                            color: ink.withAlphaComponent(0.72))
     }
 }
@@ -507,10 +441,16 @@ private final class StellarPortraitView: MTKView, MTKViewDelegate {
     private var granulation: Float = 1.0
     private var spinRate: Float = 0.03
     private let startTime = CACurrentMediaTime()
+    private var solarRatio: Float = 1
+    var onComparison: ((Bool) -> Void)?
+    private var compareSun = false
+    func toggleComparison() { compareSun.toggle(); onComparison?(compareSun); draw() }
+    override func mouseDown(with event: NSEvent) { toggleComparison() }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     private var lastPhysicsTime = CACurrentMediaTime()
 
     /// SCNView-shaped API kept so the outer inspector view is unchanged.
-    var isPlaying: Bool { get { !isPaused } set { isPaused = !newValue } }
+    var isPlaying: Bool { get { !isPaused } set { if isPaused == newValue { isPaused = !newValue } } }
     var rendersContinuously: Bool { get { !isPaused } set { isPaused = !newValue } }
 
     init(frame: NSRect) {
@@ -556,6 +496,15 @@ private final class StellarPortraitView: MTKView, MTKViewDelegate {
         h ^= h >> 29
         let jitter = Float(Double(h % 1000) / 1000.0) - 0.5
         spinRate = 0.020 + 0.030 * hot + 0.010 * jitter
+        solarRatio = max(Float(p.solarRadius), 0.001)
+        compareSun = false
+        seedJets()
+        initParticles()
+        needsWarmup = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window != nil, !self.isHidden else { return }
+            self.draw()
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -814,13 +763,13 @@ private final class StellarPortraitView: MTKView, MTKViewDelegate {
 
         var u = Uniforms(
             time: Float(now - startTime),
-            radiusScale: radiusScale,
+            radiusScale: compareSun ? min(0.43, 0.43 * solarRatio) : radiusScale,
             aspect: SIMD2(Float(drawableSize.width),
                           Float(max(drawableSize.height, 1))),
             color: SIMD4(starColor, remnant ? 1 : 0),
             params: SIMD4(activity, granulation, spinRate,
                           remnant ? 0 : 0.70 + 0.45 * activity),
-            extra: SIMD4(Float(jetCount), 0, 0, 0))
+            extra: SIMD4(Float(jetCount), solarRatio, compareSun ? 1 : 0, 0))
 
         // Pass 1: star -> hdrTex
         let starPass = MTLRenderPassDescriptor()
@@ -1132,6 +1081,7 @@ private final class StellarPortraitView: MTKView, MTKViewDelegate {
         float2 xy = in.uv * 2.0 - 1.0;
         float aspect = u.aspect.x / u.aspect.y;
         xy.x *= aspect;
+        float2 screenXY = xy;
 
         float r  = length(xy);
         float rr = dot(xy, xy);
@@ -1227,6 +1177,15 @@ private final class StellarPortraitView: MTKView, MTKViewDelegate {
             float wisp = exp(-rr * 10.0) * 0.20;
             rgb   = float3(2.5, 2.5, 3.0) * pt + float3(0.35, 0.5, 0.95) * wisp;
             alpha = clamp(pt + wisp, 0.0, 1.0);
+        }
+        if (u.extra.z > 0.5) {
+            float sunR = R / max(u.extra.y, 0.001);
+            float2 sun = screenXY - float2(R + sunR + 0.08, 0);
+            float edge = abs(length(sun) - sunR);
+            float dash = step(0.0, sin(atan2(sun.y, sun.x) * 24.0));
+            float line = (1.0 - smoothstep(0.004, 0.012, edge)) * dash;
+            rgb = mix(rgb, float3(0.65, 0.85, 1.0), line);
+            alpha = max(alpha, line);
         }
         return float4(rgb, alpha);
     }

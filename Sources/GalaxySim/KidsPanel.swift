@@ -161,7 +161,7 @@ final class ChunkyButton: NSControl {
 
     private var foreground: NSColor {
         if darkPlate || isSelected || style == .primary { return .white }
-        return .labelColor
+        return .white
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -170,7 +170,7 @@ final class ChunkyButton: NSControl {
         let radius = min(cornerRadius, min(r.width, r.height) / 2)
         let path = NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius)
 
-        let accent = NSColor.controlAccentColor
+        let accent = KidsStyle.accent
 
         // ---- halo (hotbar pulse). Concentric fading strokes: cheap, and
         // unlike a CG shadow it needs no offscreen pass to sit *behind* a
@@ -191,12 +191,12 @@ final class ChunkyButton: NSControl {
         var fill: NSColor
         switch style {
         case .primary: fill = accent.withAlphaComponent(pressed ? 1.0 : (hovering ? 0.95 : 0.85))
-        case .plain:   fill = NSColor.labelColor.withAlphaComponent(pressed ? 0.22 : (hovering ? 0.15 : 0.08))
-        case .ghost:   fill = NSColor.labelColor.withAlphaComponent(pressed ? 0.18 : (hovering ? 0.10 : 0.0))
+        case .plain:   fill = KidsStyle.button(pressed ? 0.12 : (hovering ? 0.06 : 0))
+        case .ghost:   fill = KidsStyle.button(pressed ? 0.12 : (hovering ? 0.06 : 0))
         }
         if isSelected { fill = accent.withAlphaComponent(pressed ? 1.0 : 0.92) }
         if darkPlate {
-            fill = nightFill(pressed ? 0.10 : (hovering ? 0.05 : 0))
+            fill = isSelected ? KidsStyle.accent : KidsStyle.button(pressed ? 0.12 : (hovering ? 0.06 : 0))
         }
         fill.setFill()
         path.fill()
@@ -219,11 +219,11 @@ final class ChunkyButton: NSControl {
             para.alignment = .center
             para.lineBreakMode = .byTruncatingTail
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: KidsPanel.roundedFont(11, .semibold),
+                .font: KidsPanel.roundedFont(14, .semibold),
                 .foregroundColor: foreground.withAlphaComponent(isSelected ? 1.0 : 0.85),
                 .paragraphStyle: para,
             ]
-            let h: CGFloat = 15
+            let h: CGFloat = 18
             NSAttributedString(string: caption, attributes: attrs)
                 .draw(in: NSRect(x: r.minX + 3, y: r.minY + 6, width: r.width - 6, height: h))
             iconRect = NSRect(x: r.minX + iconInset, y: r.minY + 6 + h + 2,
@@ -335,7 +335,7 @@ private final class DotsView: NSView {
             let on = (i == index)
             let s = on ? d + 3 : d
             let r = NSRect(x: x - (s - d) / 2, y: bounds.midY - s / 2, width: s, height: s)
-            (on ? NSColor.controlAccentColor
+            (on ? KidsStyle.accent
                 : NSColor.labelColor.withAlphaComponent(0.25)).setFill()
             NSBezierPath(ovalIn: r).fill()
             x += d + gap
@@ -767,11 +767,11 @@ private final class HintPill: NSView {
         let r = bounds.insetBy(dx: 0.5, dy: 0.5)
         let p = NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2)
         nightFill().setFill(); p.fill()
-        NSColor.controlAccentColor.withAlphaComponent(0.55).setStroke()
+        KidsStyle.accent.withAlphaComponent(0.55).setStroke()
         p.lineWidth = 1.5; p.stroke()
 
         let d: CGFloat = 8
-        NSColor.controlAccentColor.setFill()
+        KidsStyle.accent.setFill()
         NSBezierPath(ovalIn: NSRect(x: r.minX + 15, y: r.midY - d / 2,
                                     width: d, height: d)).fill()
 
@@ -803,7 +803,7 @@ private final class TiltReadout: NSView {
         let e = NSRect(x: cx - rad, y: cy - rad * squash,
                        width: rad * 2, height: rad * 2 * squash)
         let disc = NSBezierPath(ovalIn: e)
-        NSColor.controlAccentColor.withAlphaComponent(0.35).setFill(); disc.fill()
+        KidsStyle.accent.withAlphaComponent(0.35).setFill(); disc.fill()
         NSColor.white.withAlphaComponent(0.88).setStroke()
         disc.lineWidth = 2; disc.stroke()
 
@@ -1064,6 +1064,10 @@ final class KidsPanel: NSView {
     private let scroll = NSScrollView()
     private let stack = NSStackView()
 
+    private var encounterCenter: NSLayoutConstraint?
+    func reserveInspectorSpace(_ reserved: Bool) {
+        encounterCenter?.constant = reserved ? -190 : 0
+    }
     private let sceneLabel = NSTextField(labelWithString: "")
     private let dots = DotsView()
     private let statusLabel = NSTextField(labelWithString: "Pick a crash and press play!")
@@ -1202,12 +1206,13 @@ final class KidsPanel: NSView {
         let hotbarRoom: CGFloat = 104
         statusBottomConstraint = status.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -(hotbarRoom + 14))
 
+        encounterCenter = enc.centerXAnchor.constraint(equalTo: centerXAnchor)
         NSLayoutConstraint.activate([
             topLeft.topAnchor.constraint(equalTo: topAnchor, constant: 16),
             topLeft.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
             enc.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            enc.centerXAnchor.constraint(equalTo: centerXAnchor),
+            encounterCenter!,
 
             status.centerXAnchor.constraint(equalTo: centerXAnchor),
             statusBottomConstraint!,
@@ -1216,7 +1221,7 @@ final class KidsPanel: NSView {
 
     private func flyButton() -> ChunkyButton {
         let b = ChunkyButton(minHeight: 72)
-        b.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        b.widthAnchor.constraint(equalToConstant: 76).isActive = true
         b.heightAnchor.constraint(equalToConstant: 72).isActive = true
         b.cornerRadius = 18
         b.style = .primary
@@ -1278,11 +1283,18 @@ final class KidsPanel: NSView {
         burger.setSymbol("line.3.horizontal", fallback: "≡", pointSize: 19)
         burger.onTap = { [weak self] in self?.onHamburger?() }
 
+        // The plate. Unix time plus three hundred years, because the ship is
+        // going to places it takes that long to talk about.
+        let plate = NSTextField(labelWithString: Version.short)
+        plate.font = KidsPanel.roundedFont(9.5, .medium)
+        plate.textColor = .tertiaryLabelColor
+        plate.toolTip = Version.long
+
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
 
-        return hstack([title, spacer, fly, burger], spacing: 8)
+        return hstack([title, plate, spacer, fly, burger], spacing: 8)
     }
 
     // ---- encounter: < name > plus dots
@@ -1333,13 +1345,13 @@ final class KidsPanel: NSView {
         playButton = ChunkyButton(minHeight: 72)
         playButton.style = .primary
         playButton.cornerRadius = 18
-        playButton.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        playButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
         playButton.heightAnchor.constraint(equalToConstant: 72).isActive = true
         playButton.toolTip = "Play / pause"
         playButton.onTap = { [weak self] in self?.togglePlay() }
 
         let restart = ChunkyButton(minHeight: 72)
-        restart.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        restart.widthAnchor.constraint(equalToConstant: 76).isActive = true
         restart.heightAnchor.constraint(equalToConstant: 72).isActive = true
         restart.cornerRadius = 18
         restart.caption = "Restart"
@@ -1400,7 +1412,7 @@ final class KidsPanel: NSView {
     /// here only cost screen.
     private func buildCard() -> NSView {
         placeButton = ChunkyButton(minHeight: 72)
-        placeButton.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        placeButton.widthAnchor.constraint(equalToConstant: 76).isActive = true
         placeButton.heightAnchor.constraint(equalToConstant: 72).isActive = true
         placeButton.cornerRadius = 18
         placeButton.caption = "Creation"
@@ -1409,7 +1421,7 @@ final class KidsPanel: NSView {
         placeButton.onTap = { [weak self] in self?.togglePlace() }
 
         let clear = ChunkyButton(minHeight: 72)
-        clear.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        clear.widthAnchor.constraint(equalToConstant: 76).isActive = true
         clear.heightAnchor.constraint(equalToConstant: 72).isActive = true
         clear.cornerRadius = 18
         clear.caption = "Clear"
@@ -1690,7 +1702,7 @@ final class SegmentedChunk: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds
         let plate = NSBezierPath(roundedRect: r, xRadius: cornerRadius, yRadius: cornerRadius)
-        NSColor(calibratedWhite: 0.09, alpha: 0.92).setFill()
+        KidsStyle.button().setFill()
         plate.fill()
         NSColor(calibratedWhite: 1, alpha: 0.10).setStroke()
         plate.lineWidth = 1
@@ -1703,7 +1715,7 @@ final class SegmentedChunk: NSView {
             if selectedIndex == i {
                 let sel = NSBezierPath(roundedRect: cell.insetBy(dx: 3, dy: 3),
                                        xRadius: cornerRadius - 4, yRadius: cornerRadius - 4)
-                NSColor.controlAccentColor.withAlphaComponent(0.92).setFill()
+                KidsStyle.accent.withAlphaComponent(0.92).setFill()
                 sel.fill()
             } else if hovered == i {
                 let h = NSBezierPath(roundedRect: cell.insetBy(dx: 3, dy: 3),
@@ -1726,7 +1738,7 @@ final class SegmentedChunk: NSView {
                                  y: cell.midY - side / 2 - (seg.caption == nil ? 0 : 5),
                                  width: side, height: side)
                 fg.set()
-                img.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1,
+                KidsPanel.tinted(img, fg).draw(in: box, from: .zero, operation: .sourceOver, fraction: 1,
                          respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
             } else if let t = seg.text ?? (images[i] == nil ? seg.fallback : nil) {
                 let f = KidsPanel.roundedFont(seg.caption == nil ? 17 : 16, .bold)

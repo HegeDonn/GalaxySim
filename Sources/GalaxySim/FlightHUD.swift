@@ -23,25 +23,36 @@ import simd
 /// right *and* up and down), and turn the ring to roll. The stick reports a
 /// *held* vector which the host reads once per frame in its flight
 /// integrator, exactly the way it reads held keys — no timers, frame-rate
-/// independent for free. Roll is different: it is a direct 1:1 drag, so the
-/// picture turns exactly as far as your finger does.
+/// independent for free. The ring reports how far it was just turned, which
+/// the ship takes as momentum rather than as an angle: wind it and let go and
+/// the ship keeps rolling, then coasts to a stop.
+///
+/// Nothing here moves the ship itself. Every control states an intention and
+/// the ship takes its time about it — see `FlightCamera`'s inertia section.
 final class FlightHUD: NSView {
+    var onClearTarget: (() -> Void)?
+    var hasStarTarget = false { didSet { clearTargetButton.isHidden = !hasStarTarget || !controlsVisible; needsLayout = true } }
+    private let clearTargetButton = PillButton(title: "Clear star", symbol: "xmark.circle")
     var onExit: (() -> Void)?
     var onPause: (() -> Void)?
     var onRecenter: (() -> Void)?
     var onSpeed: ((Float) -> Void)?
-    /// Radians, applied immediately: the ring is a wheel, not a rate.
+    /// Radians of ring travel. Not an angle to roll to: the ring is a heavy
+    /// flywheel, and this is how hard it was just pushed.
     var onRoll: ((Float) -> Void)?
 
     var controlsVisible = true {
         didSet {
             subviews.forEach { $0.isHidden = !controlsVisible }
+            clearTargetButton.isHidden = !controlsVisible || !hasStarTarget
             if !controlsVisible { releaseSteering() }
             needsDisplay = true
         }
     }
 
     private let title = NSTextField(labelWithString: "LUMEN  ·  CITY AMONG THE STARS")
+    private let plate = NSTextField(labelWithString: Version.long)
+    private let explain = NSTextField(labelWithString: "")
     private let velocity = NSTextField(labelWithString: "Cruise")
     private let help = NSTextField(labelWithString:
         "slide the left pad for speed   ·   push the stick to steer   ·   turn its ring to roll   ·   drag the sky to look")
@@ -71,7 +82,15 @@ final class FlightHUD: NSView {
         help.font = KidsStyle.font(11, .medium)
         help.textColor = NSColor.white.withAlphaComponent(0.45)
         help.alignment = .center
-        for f in [title, velocity, help] {
+        plate.font = KidsStyle.font(9.5, .medium)
+        plate.textColor = NSColor.white.withAlphaComponent(0.30)
+        plate.toolTip = "Unix time plus three hundred years. It is when this build was switched on."
+        // The one line that explains the picture rather than the controls, so
+        // it is brighter than the help and sits above it.
+        explain.font = KidsStyle.font(12, .semibold)
+        explain.textColor = KidsStyle.accentOnNight.withAlphaComponent(0.92)
+        explain.alignment = .center
+        for f in [title, plate, velocity, help, explain] {
             f.lineBreakMode = .byTruncatingTail
             addSubview(f)
         }
@@ -104,7 +123,10 @@ final class FlightHUD: NSView {
         backButton.toolTip = "Stop flying and go back to the galaxy. Esc does the same."
         backButton.setAccessibilityLabel("Leave the ship")
         backButton.onTap = { [weak self] in self?.onExit?() }
-        for b in [followButton, pauseButton, backButton] { addSubview(b) }
+        clearTargetButton.identifier = NSUserInterfaceItemIdentifier("flight.clearStar")
+        clearTargetButton.onTap = { [weak self] in self?.onClearTarget?() }
+        clearTargetButton.isHidden = true
+        for b in [followButton, pauseButton, backButton, clearTargetButton] { addSubview(b) }
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -125,6 +147,16 @@ final class FlightHUD: NSView {
     }
     var reviewPauseTitle: String { pauseButton.title }
     var reviewThrottleFraction: CGFloat { energy.fraction }
+    /// The explanation is the one line here that is worth reading, so a
+    /// window narrow enough to clip it is a bug, not a cosmetic detail.
+    var reviewExplanationFits: Bool {
+        guard let font = explain.font, explain.frame.width > 0 else { return false }
+        let widest = [0.5, 0.8, 0.95, 0.999]
+            .map { FlightHUD.explanation(beta: Float($0)) }
+            .map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+            .max() ?? 0
+        return widest <= explain.frame.width
+    }
     /// Slide the throttle by a number of points, positive being upward.
     func reviewThrottleSlide(_ points: CGFloat) { energy.slideForReview(points) }
     func reviewSteer(x: Float, y: Float) { stick.holdForReview(SIMD2(x, y)) }
@@ -149,7 +181,7 @@ final class FlightHUD: NSView {
 
         // ---- corner pills, laid out from the right edge inward --------
         var x = w - margin
-        for pill in [backButton, pauseButton, followButton] {
+        for pill in [backButton, pauseButton, followButton, clearTargetButton] where !pill.isHidden {
             let size = pill.intrinsicContentSize
             x -= size.width
             pill.frame = NSRect(x: x, y: 18, width: size.width, height: size.height)
@@ -171,9 +203,11 @@ final class FlightHUD: NSView {
         velocity.frame = NSRect(x: margin + 4, y: barY - 30, width: min(340, w - 80), height: 26)
 
         let helpLeft = energy.frame.maxX + 24
-        help.frame = NSRect(x: helpLeft, y: h - 28,
-                            width: max(0, stick.frame.minX - 24 - helpLeft), height: 18)
+        let helpWidth = max(0, stick.frame.minX - 24 - helpLeft)
+        help.frame = NSRect(x: helpLeft, y: h - 28, width: helpWidth, height: 18)
+        explain.frame = NSRect(x: helpLeft, y: h - 50, width: helpWidth, height: 18)
         title.frame = NSRect(x: margin + 4, y: 22, width: max(0, x - margin - 16), height: 18)
+        plate.frame = NSRect(x: margin + 4, y: 42, width: max(0, x - margin - 16), height: 14)
     }
 
     // MARK: speed mapping
@@ -207,9 +241,33 @@ final class FlightHUD: NSView {
             ? "Paused  ·  \(name)"
             : String(format: flight.beta >= 0.999 ? "%@  ·  %.2f%% light speed" : "%@  ·  %.1f%% light speed", name, flight.beta * 100)
         energy.fraction = CGFloat(Self.throttlePosition(beta: flight.beta))
+        energy.commanded = CGFloat(Self.throttlePosition(beta: flight.commandedBeta))
         energy.paused = paused
+        explain.stringValue = Self.explanation(beta: flight.beta)
         energy.setAccessibilityValue(String(format: "%.1f percent of light speed",
                                             flight.beta * 100))
+    }
+
+    /// Why the sky did that.
+    ///
+    /// It is the question the picture asks at speed, and "everything went to a
+    /// small dot" looks exactly like a bug until someone says otherwise. All
+    /// three effects are real and all three are in the render: aberration
+    /// moves where light *seems* to come from, Doppler changes its colour,
+    /// and beaming changes how bright it is.
+    static func explanation(beta: Float) -> String {
+        switch beta {
+        case ..<0.30:
+            return ""
+        case ..<0.62:
+            return "The stars ahead are going blue — you are running into their light."
+        case ..<0.90:
+            return "The sky is crowding ahead. That is aberration: you meet light head on."
+        case ..<0.985:
+            return "Aberration has squeezed most of the sky into that spot. Behind you it is dark and red."
+        default:
+            return "The whole sky is now one small dot ahead. Not a bug — this is what this speed looks like."
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {}
@@ -224,7 +282,13 @@ final class FlightHUD: NSView {
 /// thumb on it at 0.9c without the ship immediately dropping to whatever
 /// speed your thumb happened to be over.
 private final class ThrottleStrip: NSControl, TouchTarget {
+    /// What the ship has got to.
     var fraction: CGFloat = 0 { didSet { if fraction != oldValue { needsDisplay = true } } }
+    /// Where the thumb has asked it to get to. The two are different for as
+    /// long as the ship takes to accelerate, which at this size of ship is
+    /// most of the time — so the gauge has to show both or the pad looks
+    /// broken.
+    var commanded: CGFloat = 0 { didSet { if commanded != oldValue { needsDisplay = true } } }
     var paused = false { didSet { needsDisplay = true } }
     var onChange: ((Float) -> Void)?
 
@@ -241,7 +305,10 @@ private final class ThrottleStrip: NSControl, TouchTarget {
 
     override func mouseDown(with event: NSEvent) {
         dragStartY = convert(event.locationInWindow, from: nil).y
-        dragStartFraction = fraction
+        // The thumb picks up the *target*, not the speed the ship happens to
+        // have reached: otherwise every touch during a burn would throw away
+        // the rest of it.
+        dragStartFraction = commanded
         dragging = true
     }
 
@@ -265,7 +332,7 @@ private final class ThrottleStrip: NSControl, TouchTarget {
 
     func slideForReview(_ points: CGFloat) {
         dragStartY = 0
-        dragStartFraction = fraction
+        dragStartFraction = commanded
         dragging = true
         slide(to: -points)
         dragging = false
@@ -336,20 +403,24 @@ private final class ThrottleStrip: NSControl, TouchTarget {
             }
         }
 
-        // A grip on the topmost lit cell. The strip is wide enough to be a
-        // thumb rest now, and the grip is what says so.
-        if let top = topLit {
-            NSColor(calibratedWhite: 0.08, alpha: 0.7).setStroke()
-            let grip = NSBezierPath()
-            for k in 0..<2 {
-                let y = top.midY - 2.5 + CGFloat(k) * 5
-                grip.move(to: NSPoint(x: top.midX - 11, y: y))
-                grip.line(to: NSPoint(x: top.midX + 11, y: y))
-            }
-            grip.lineWidth = 2
-            grip.lineCapStyle = .round
-            grip.stroke()
+        // The thumb grip, drawn at the TARGET rather than at the speed. This
+        // is the part you drag, and it runs ahead of the bar while the ship
+        // is still working its way up to it.
+        let ty = cells.maxY - commanded * cells.height
+        let marker = NSRect(x: r.minX + 3, y: ty - 4, width: r.width - 6, height: 8)
+        let knob = NSBezierPath(roundedRect: marker, xRadius: 4, yRadius: 4)
+        (paused ? KidsStyle.accentOnNight.withAlphaComponent(0.4) : KidsStyle.accentOnNight).setFill()
+        knob.fill()
+        NSColor(calibratedWhite: 0.05, alpha: 0.75).setStroke()
+        let grip = NSBezierPath()
+        for k in 0..<2 {
+            let y = marker.midY - 2 + CGFloat(k) * 4
+            grip.move(to: NSPoint(x: marker.midX - 12, y: y))
+            grip.line(to: NSPoint(x: marker.midX + 12, y: y))
         }
+        grip.lineWidth = 1.5
+        grip.lineCapStyle = .round
+        grip.stroke()
 
         // Which way is faster, in the only two glyphs that need no reading.
         NSColor.white.withAlphaComponent(0.4).setStroke()
