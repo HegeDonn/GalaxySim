@@ -450,7 +450,7 @@ private final class ThrottleStrip: NSControl, TouchTarget {
 /// thirty degrees, like a steering wheel. Rolling is not a rate, because
 /// unlike steering there is no such thing as "keep rolling" that anyone
 /// wants; you turn until the horizon looks right and stop.
-private final class ShipStick: NSControl, TouchTarget {
+final class ShipStick: NSControl, TouchTarget {
     /// x = yaw (right positive), y = pitch (nose up positive), −1…1.
     private(set) var vector = SIMD2<Float>(0, 0) { didSet { needsDisplay = true } }
     var onRoll: ((Float) -> Void)?

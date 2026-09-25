@@ -808,7 +808,7 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         observatory.onBack = { [weak self] in self?.leavePlanet() }
         planetObservatory = observatory
         view.addSubview(observatory)
-        view.window?.makeFirstResponder(observatory)
+        observatory.focusControls()
     }
 
     /// GALAXYSIM_OBSERVATORY=1 opens the night sky straight away on a star
@@ -986,9 +986,98 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         setFlight(false)
         check(!starInspector.isHidden, "Returning from flight restores the selected star card")
         let previousPause = host.sim.isPaused
+        let planetEntryStart = CACurrentMediaTime()
         visitSelectedPlanet()
+        print("Planet entry returned in \(CACurrentMediaTime() - planetEntryStart) seconds")
         check(planetObservatory != nil && host.sim.isPaused && metalView.isPaused, "Planet entry freezes parent simulation")
         let planet = planetObservatory!
+        check(planet.reviewLandingGameVisible, "Planet visit opens live navigation beside the camera")
+        planet.reviewKeepNavigatorAwake()
+        check(planet.reviewLandingSurfaceReady, "Metal planet renders without CPU texture generation")
+        let originalSite = planet.reviewLandingSite
+        var flight = LandingNavigation(planet: originalSite, heart: originalSite.north)
+        let startNormal = flight.normal
+        flight.drive(dt: 1, input: SIMD2(0,1), brake: false)
+        check(flight.speed > 0.3 && simd_distance(startNormal, flight.normal) > 0.1,
+              "Drone pad moves over the globe")
+        flight.drive(dt: 1, input: .zero, brake: true)
+        check(flight.speed == 0, "Brake stops the landing ship quickly")
+        let stopped = flight.normal
+        let oldHeading = flight.heading
+        flight.rotate(0.9)
+        check(simd_distance(stopped, flight.normal) < 0.0001 && simd_distance(oldHeading, flight.heading) > 0.5,
+              "Ship can turn in place without changing the landing spot")
+        var reachedFarSide = false
+        for _ in 0..<1800 {
+            flight.drive(dt: 1.0 / 30, input: SIMD2(0,1), brake: false)
+            reachedFarSide = reachedFarSide || simd_dot(stopped, flight.normal) < -0.9
+        }
+        check(reachedFarSide, "Flight can reach the other side of the planet")
+        check(abs(simd_length(flight.normal) - 1) < 0.0001
+              && abs(simd_length(flight.heading) - 1) < 0.0001
+              && abs(simd_dot(flight.normal, flight.heading)) < 0.0001,
+              "Long flights preserve a stable orthogonal surface frame")
+        for size in [NSSize(width: 1000, height: 650), NSSize(width: 1440, height: 900)] {
+            view.window?.setContentSize(size)
+            view.layoutSubtreeIfNeeded()
+            try screenshot("landing-game-\(Int(size.width))")
+            check(planet.reviewLandingControlsFit, "Landing controls fit at \(Int(size.width))")
+        }
+        for index in [0, 4, 5, 10] {
+            planet.reviewLandingAtmosphere(Atmosphere.all[index])
+            try screenshot("landing-atmosphere-\(index)")
+        }
+        planet.reviewLandingAtmosphere(Atmosphere.all[0])
+        planet.reviewCloudTime(0)
+        try screenshot("planet-clouds-time-0")
+        planet.reviewCloudTime(45)
+        try screenshot("planet-clouds-time-45")
+        for index in [5, 9] {
+            planet.reviewLandingAtmosphere(Atmosphere.all[index])
+            planet.reviewCloudTime(0)
+            try screenshot("gas-\(index)-time-0")
+            planet.reviewCloudTime(45)
+            try screenshot("gas-\(index)-time-45")
+        }
+        planet.reviewCloudTime(nil)
+        planet.reviewLandingAtmosphere(nil)
+        check(planet.reviewPlanetTuning(), "Planet workshop controls fit without scrolling")
+        try screenshot("planet-workshop")
+        planet.reviewClosePlanetTuning()
+        let config = PlanetTuning()
+        let decoded = try JSONDecoder().decode(PlanetTuning.self, from: Data(config.json().utf8))
+        check(decoded.json() == config.json(), "Planet configuration JSON round trips")
+        let legacy = try JSONDecoder().decode(PlanetTuning.self, from: Data("{\"cloudSpeed\":4.15492,\"airDensity\":2.3326585}".utf8))
+        check(legacy.cloudSpeed == 4.15492 && legacy.airDensity == 2.3326585 && legacy.gasScale == config.gasScale,
+              "Older planet settings preserve values and gain gas defaults")
+        check(planet.reviewLandingFlightControls, "Drone pad, ring, quick release stop and keyboard controls work")
+        let lookBeforeTurn = planet.reviewLookDirection
+        planet.reviewTurnNavigator(0.5)
+        check(simd_distance(lookBeforeTurn, planet.reviewLookDirection) > 0.1,
+              "Navigator turns the actual sky on the first ring movement")
+        planet.reviewTurnNavigator(-0.5)
+        planet.reviewMoveLanding(to: SIMD2(0.2, 0.08))
+        check(abs(planet.reviewChosenAltitude - 0.08) < 0.001, "Ship can put the galaxy just above the horizon")
+        planet.reviewMoveLanding(to: SIMD2(-0.2, 0.65))
+        check(abs(planet.reviewChosenAltitude - 0.65) < 0.001, "Moving up raises the galaxy in the preview")
+        try screenshot("landing-high-galaxy")
+        planet.reviewMoveLanding(to: SIMD2(0, 0.24))
+        planet.reviewStartLanding()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.6))
+        check(!planet.reviewLandingGameVisible, "Closing navigation leaves the chosen sky visible")
+        check(abs(planet.reviewGalaxyAltitude - 0.24) < 0.002, "Arrival uses the preview's chosen horizon")
+        check(simd_length(planet.reviewLandingSite.axis - originalSite.axis) < 0.001
+              && simd_length(planet.reviewLandingSite.sun - originalSite.sun) < 0.001,
+              "Choosing a place preserves this planet and its sun")
+        planet.reviewOpenLanding()
+        planet.reviewMoveLanding(to: SIMD2(0.3, -0.2))
+        planet.reviewCancelLanding()
+        check(abs(planet.reviewGalaxyAltitude + 0.2) < 0.002 && !planet.reviewLandingGameVisible,
+              "Hiding live navigation preserves the new location")
+        planet.reviewOpenLanding()
+        planet.reviewMoveLanding(to: SIMD2(0, 0.24))
+        planet.reviewCancelLanding()
+        try screenshot("landing-touchdown")
         check(KidsStyle.nightVision, "Standing on the planet turns the chrome red")
         check(planet.reviewReadingToggle, "Night text toggles white and back to its original red styling")
         // Every pill on this screen carries a sentence, and a sentence in a
@@ -1041,16 +1130,13 @@ final class MainViewController: NSViewController, MTKViewDelegate {
               "Turning the dial during an exposure closes the shutter")
 
         // ---- where the probe stands, and what its star does ----------
-        // The galaxy used to lie along the skyline and, as often as not,
-        // under it: the sky assumed the planet's pole was the simulation's
-        // +Y axis, and the disc lies near its XZ plane. A landing now picks
-        // a pole of its own. Six of them, because one lucky roll proves
-        // nothing.
+        // Repeat the public landing flow: choosing another place must not
+        // randomize this planet or silently return to the old overhead view.
         planet.reviewViewfinder(seconds: 4)
         for attempt in 1...6 {
             planet.reviewReland()
-            check(planet.reviewGalaxyAltitude > 0.40,
-                  "Landing \(attempt) puts the galaxy well above the skyline")
+            check(abs(planet.reviewGalaxyAltitude - 0.24) < 0.002,
+                  "Landing \(attempt) preserves the chosen low skyline")
             check(planet.reviewStarAltitude < 0,
                   "Landing \(attempt) arrives at night")
         }
@@ -1067,16 +1153,30 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         // Sleeping turns the ground until the star is up, and again until it
         // has set. Both frames are captured: whether a star blots out its own
         // sky is the entire question, and it is a picture, not a number.
+        let stablePose = planet.reviewSkyPose
         planet.reviewSleep()
+        check(simd_distance(stablePose, planet.reviewSkyPose) < 0.00001, "Daylight preserves camera, galaxy and horizon orientation")
         check(planet.reviewStarAltitude > 0, "Sleeping brings the host star up")
-        check(planet.reviewGalaxyAltitude > 0.40,
-              "The galaxy is still overhead in daylight")
+        check(abs(planet.reviewGalaxyAltitude - 0.24) < 0.21,
+              "Changing sunlight keeps the chosen skyline near the horizon")
         check(planet.reviewDraw(), planet.renderError ?? "daylight frame")
         try screenshot("planet-daylight")
         planet.reviewSleep()
         check(planet.reviewStarAltitude < 0, "Sleeping again returns to night")
+        check(simd_distance(stablePose, planet.reviewSkyPose) < 0.00001, "Night preserves camera and galaxy orientation")
         check(planet.reviewDraw(), planet.renderError ?? "second night frame")
         try screenshot("planet-night-again")
+        let poseBeforeReopening = planet.reviewSkyPose
+        planet.reviewOpenLanding()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.2))
+        check(simd_distance(poseBeforeReopening, planet.reviewSkyPose) < 0.00001,
+              "Reopening the navigator does not rotate the camera")
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 6.2))
+        check(planet.reviewNavigatorResting, "Idle planet hides while its pad stays available")
+        planet.reviewOpenLanding()
+        planet.reviewPressShutter()
+        check(!planet.reviewLandingGameVisible, "Shutter hides and stops planet navigation")
+
 
         // ---- daylight on a world that actually gets some -------------
         // The landing above was around whatever star the explorer clicked,
@@ -1119,7 +1219,9 @@ final class MainViewController: NSViewController, MTKViewDelegate {
         // still sitting on four seconds and blew the landscape out again.
         // Daylight is daylight whichever way the camera points.
         planet.reviewViewfinder(seconds: 4)
+        let exposureBeforeLookingAway = planet.reviewAutoShutter
         planet.reviewLookAway()
+        check(planet.reviewAutoShutter == exposureBeforeLookingAway, "Daylight shutter stays fixed when looking away from the sun")
         let away = planet.reviewAutoShutter
         check(away != nil, "Turning away from the sun keeps the camera metering")
         check(away! < 1, String(format: "The shutter follows the light round: %@ s",

@@ -14,8 +14,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 DEST = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'public-release/GalaxySim'
 FILES = ['AGENTS.md', '.gitignore', 'Package.swift', 'README.md', 'rebuild-app.sh',
-         'PUBLICATION.md', 'PERFORMANCE_HANDOFF.md', 'STAR_EXPLORER_HANDOFF.md',
-         'PLANET_PHOTOGRAPHY_DESIGN.md']
+         'PUBLICATION.md', 'TECHNICAL_GUIDE.md', 'PERFORMANCE_HANDOFF.md', 'STAR_EXPLORER_HANDOFF.md',
+         'PLANET_PHOTOGRAPHY_DESIGN.md', 'LANDING_GAME_PLAN.md']
 TREES = ['Sources', 'Tools', 'Packaging']
 SUFFIXES = {'.swift', '.metal', '.mesh', '.json', '.py', '.plist'}
 terms_file = ROOT / '.privacy-terms'
@@ -31,6 +31,9 @@ for tree in TREES:
     paths += [p for p in (ROOT / tree).rglob('*') if p.is_file() and p.suffix in SUFFIXES and '__pycache__' not in p.parts]
 for name in ['LICENSE', 'NOTICE']:
     if (ROOT / name).exists(): paths.append(ROOT / name)
+# Public gallery: only these reviewed, metadata-stripped screenshots.
+paths += [ROOT / 'Docs/images' / (name + '.png') for name in
+          ['create-galaxies', 'fly-through-galaxies', 'meet-a-star', 'photograph-the-sky']]
 errors = []
 for path in paths:
     if path.is_symlink():

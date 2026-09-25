@@ -58,6 +58,10 @@ final class PlanetObservatoryView: NSView {
     static let brightnessCeiling: Float = 100_000
 
     var onBack: (() -> Void)?
+    private var landingGame: LandingGameView?
+    private var hasLanded = false
+    private let planetSeed: UInt32
+    private let landingStars: [ObservatoryStar]
     private let sky: ObservatoryMetalView
     private let progress = NSProgressIndicator()
     private let status = SkyReadingLabel(labelWithString: "")
@@ -73,8 +77,8 @@ final class PlanetObservatoryView: NSView {
     private var tuningPanel: ObservatoryTuningPanel?
     private let menuButton = SkyMenuButton()
     /// The two things a visitor cannot do for themselves: move, and wait.
-    private let relandButton = PillButton(title: "Land somewhere else", symbol: "location")
-    private let sleepButton = PillButton(title: "Sleep until sunrise", symbol: "moon.zzz")
+    private let relandButton = PillButton(title: "Explore this planet", symbol: "location")
+    private let sleepButton = PillButton(title: "Bring up the sun", symbol: "moon.zzz")
     private let placeCard = SkyReadingLabel(wrappingLabelWithString: "")
     private let dialGlass = DialGlassView()
     private let hint = SkyReadingLabel(labelWithString: "Drag to look around · press the shutter")
@@ -104,6 +108,8 @@ final class PlanetObservatoryView: NSView {
         // here the light meter has the say: turn the planet into its day and
         // the red goes with the dark, because it was only ever there to
         // protect an eye that by then has nothing left to protect.
+        planetSeed = profile.planetSeed
+        landingStars = stars
         KidsStyle.nightVision = true
         sky = ObservatoryMetalView(stars: stars, profile: profile)
         let air = Atmosphere.forPlanet(name: profile.name)
@@ -258,8 +264,8 @@ final class PlanetObservatoryView: NSView {
         placeCard.setContentCompressionResistancePriority(.required, for: .vertical)
         relandButton.onTap = { [weak self] in self?.handUsed(); self?.relandPressed() }
         sleepButton.onTap = { [weak self] in self?.handUsed(); self?.sleepPressed() }
-        relandButton.setAccessibilityLabel("Set the probe down somewhere else on this planet")
-        sleepButton.setAccessibilityLabel("Let the planet turn until the star rises or sets")
+        relandButton.setAccessibilityLabel("Show or hide the planet navigation pad")
+        sleepButton.setAccessibilityLabel("Bring the sun up or return to night without moving your view")
         // Always glyphs. Their titles change with the state ("Stop here" is
         // short, "Sleep until sunrise" is not), and a control that swaps
         // between a word and an icon is a control that moves under the thumb.
@@ -375,6 +381,7 @@ final class PlanetObservatoryView: NSView {
     /// button down is not part of it — a 60 s exposure is not something a
     /// hand should have to sit through.
     private func toggleExposure() {
+        if landingGame != nil { dismissLandingGame() }
         if sky.shutterState == .exposing {
             sky.endExposure()
             status.stringValue = "Photograph taken"
@@ -388,16 +395,81 @@ final class PlanetObservatoryView: NSView {
         shutter.needsDisplay = true
     }
     @objc private func relandPressed() {
-        sky.reland()
+        if landingGame == nil { showLandingGame() } else { dismissLandingGame() }
+    }
+
+    private func showLandingGame() {
+        guard landingGame == nil else { return }
+        sky.isPaused = false
+        let game = LandingGameView(site: sky.site, heart: sky.galaxyHeart,
+                                   stars: landingStars, fieldOfView: sky.halfFovTan, atmosphere: sky.atmosphere, seed: planetSeed)
+        game.embedded = true
+        if hasLanded { game.resume(at: sky.site) }
+        else { sky.land(at: game.navigation.site); hasLanded = true }
+        sky.prepareNavigation(heading: game.navigation.heading)
+        game.onNavigate = { [weak self] site, heading in
+            guard let self else { return }
+            self.sky.navigate(at: site, heading: heading)
+            self.shutter.isExposing = false
+            self.shutter.needsDisplay = true
+        }
+        game.onCancel = { [weak self] in self?.dismissLandingGame() }
+        game.onIdle = { [weak game] in game?.restNavigation() }
+        game.onLand = { [weak self] site in self?.finishLanding(at: site) }
+        landingGame = game
+        addSubview(game)
+        needsLayout = true
+        window?.makeFirstResponder(game)
+    }
+
+    private func finishLanding(at site: LandingSite) {
+        sky.land(at: site)
+        hasLanded = true
         shutter.isExposing = false
         shutter.needsDisplay = true
         updateSleepTitle()
-        status.stringValue = "A different spot on this planet · the galaxy is overhead again"
+        status.stringValue = "Touchdown — your skyline is waiting"
+        dismissLandingGame()
     }
 
-    /// Pressed while the ground is already turning, this stops it where it
-    /// stands -- impatience is a legitimate answer to a five-second sweep.
+    private func dismissLandingGame() {
+        landingGame?.stop()
+        landingGame?.removeFromSuperview()
+        landingGame = nil
+        sky.isPaused = false
+        window?.makeFirstResponder(self)
+        wakeChrome()
+    }
+
+    func focusControls() { window?.makeFirstResponder(landingGame ?? self) }
+    var reviewLookDirection: SIMD3<Float> { sky.reviewDirection }
+    func reviewTurnNavigator(_ angle: Float) { landingGame?.reviewTurn(angle) }
+    func reviewPressShutter() { toggleExposure() }
+    func reviewKeepNavigatorAwake() { landingGame?.reviewKeepsAwake = true }
+    var reviewSkyPose: SIMD4<Float> { sky.reviewPose }
+    var reviewNavigatorResting: Bool { landingGame?.isResting == true }
+    var reviewLandingGameVisible: Bool { landingGame != nil }
+    func reviewStartLanding() { landingGame?.beginLanding() }
+    func reviewOpenLanding() { showLandingGame() }
+    func reviewCancelLanding() { landingGame?.onCancel?() }
+    var reviewLandingControlsFit: Bool { landingGame?.reviewControlsFit ?? false }
+    func reviewPlanetTuning() -> Bool { landingGame?.reviewTuning() ?? false }
+    func reviewClosePlanetTuning() { landingGame?.reviewCloseTuning() }
+    func reviewCloudTime(_ time: Float?) { landingGame?.reviewCloudTime(time) }
+    var reviewLandingSurfaceReady: Bool { landingGame?.reviewWaitForSurface() ?? false }
+    var reviewLandingFlightControls: Bool { landingGame?.reviewFlightControls() ?? false }
+    func reviewLandingAtmosphere(_ air: Atmosphere?) { landingGame?.reviewAtmosphere(air ?? sky.atmosphere) }
+    func reviewMoveLanding(to p: SIMD2<Float>) { landingGame?.reviewMove(to: p) }
+    var reviewChosenAltitude: Float { landingGame.map { $0.navigation.site.altitude(of: sky.galaxyHeart) } ?? -2 }
+    var reviewLandingSite: LandingSite { sky.site }
+
+    func reviewLandAtChosenSpot() {
+        if let game = landingGame { finishLanding(at: game.navigation.site) }
+    }
+
+    /// A second press stops the gentle lighting transition in place.
     @objc private func sleepPressed() {
+        if landingGame != nil { dismissLandingGame() }
         if sky.isTurning {
             sky.stopTurning()
             updateSleepTitle()
@@ -409,17 +481,17 @@ final class PlanetObservatoryView: NSView {
         shutter.needsDisplay = true
         sleepButton.title = "Stop here"
         sleepButton.symbolName = "stop.fill"
-        sleepButton.setAccessibilityLabel("Stop the planet turning where it is")
+        sleepButton.setAccessibilityLabel("Stop the lighting transition")
     }
 
     /// The words live in the tooltip and the accessibility label now, so the
     /// glyph has to carry the state change on its own: a waiting moon while
     /// the ground is still, a stop square while it is turning.
     private func updateSleepTitle() {
-        sleepButton.title = sky.starIsUp ? "Sleep until dark" : "Sleep until sunrise"
+        sleepButton.title = sky.starIsUp ? "Bring back night" : "Bring up the sun"
         sleepButton.symbolName = "moon.zzz"
         sleepButton.setAccessibilityLabel(
-            "Let the planet turn until the star " + (sky.starIsUp ? "sets" : "rises"))
+            "Move the sun until it " + (sky.starIsUp ? "sets" : "rises"))
     }
 
     /// Entry point for the auto-shoot diagnostic: a single press, exactly as
@@ -451,6 +523,7 @@ final class PlanetObservatoryView: NSView {
 
     override func layout() {
         super.layout()
+        landingGame?.frame = NSRect(x: bounds.width - 205, y: 18, width: 190, height: 290)
     }
 
     // MARK: - chrome that gets out of the way
@@ -503,7 +576,10 @@ final class PlanetObservatoryView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         sky.isPaused = window == nil
-        if window != nil { window?.makeFirstResponder(self) }
+        if window != nil {
+            if !hasLanded { showLandingGame() }
+            else { window?.makeFirstResponder(self) }
+        } else { landingGame?.stop() }
         // GALAXYSIM_AUTOSHOOT=<seconds> presses the shutter by itself, so the
         // developed frame can be reviewed without a hand on the mouse.
         if ProcessInfo.processInfo.environment["GALAXYSIM_TUNE"] != nil,
@@ -601,6 +677,7 @@ final class PlanetObservatoryView: NSView {
         status.stringValue = "Engineering panel open · press E to hide it"
     }
     func stop() {
+        landingGame?.stop()
         sky.isPaused = true
         sky.onProgress = nil
         chromeTimer?.invalidate()
@@ -735,7 +812,7 @@ final class PlanetObservatoryView: NSView {
     }
 
     /// Review harness: land again, and take a whole night's turn in one step.
-    func reviewReland() { sky.reland() }
+    func reviewReland() { showLandingGame(); reviewLandAtChosenSpot() }
     func reviewSleep() { _ = sky.sleep(); sky.finishTurn() }
     /// Sine of the altitude of the host star and of the galaxy's bulge.
     var reviewStarAltitude: Float { sky.starAltitude }
@@ -904,7 +981,16 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
 
     /// The exposure the light is asking for, unsnapped -- or nil before the
     /// first reading.
+    // An incident-light estimate: same daylight exposure for every camera bearing.
+    // Dim suns still select the dial's 1/4-second stop rather than a night exposure.
+    private var daylightShutter: Float? {
+        guard site.altitude(of: site.sun) > 0 else { return nil }
+        let tune = ObservatoryTuning.current
+        let light = max(Float(host?.insolation ?? 1) * tune.dayScale / 320, 0.00001)
+        return max(Self.fastestShutterSeconds, min(Self.dialFloorSeconds, (1.0 / 30) / light))
+    }
     private var meteredSeconds: Float? {
+        if let daylightShutter { return daylightShutter }
         guard meterKey > 0 else { return nil }
         let tune = ObservatoryTuning.current
         let gain = max(tune.plateGain, 1e-5)
@@ -923,7 +1009,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// Decide who is holding the shutter, once per reading.
     private func updateAutoHold() {
         guard let wanted = meteredSeconds else { autoHolds = false; return }
-        if wanted < Self.dialFloorSeconds { autoHolds = true }
+        if wanted <= Self.dialFloorSeconds { autoHolds = true }
         else if wanted > Self.dialReturnSeconds { autoHolds = false }
         isDark = isDark ? wanted > Self.dialFloorSeconds : wanted >= Self.dialReturnSeconds
     }
@@ -932,6 +1018,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// charge. Reported to the interface so the reading on the dial is the
     /// speed the camera will actually use.
     var autoShutter: Float? {
+        if let daylightShutter { return Self.snap(daylightShutter) }
         guard autoHolds, let wanted = meteredSeconds else { return nil }
         return Self.snap(max(wanted, Self.fastestShutterSeconds))
     }
@@ -1155,6 +1242,8 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// without a hand on the mouse.
     private static let autoPan: Float =
         Float(ProcessInfo.processInfo.environment["GALAXYSIM_AUTOPAN"] ?? "") ?? 0
+    var reviewDirection: SIMD3<Float> { site.east * (sin(yaw)*cos(pitch)) + site.north * (cos(yaw)*cos(pitch)) + site.zenith*sin(pitch) }
+    var reviewPose: SIMD4<Float> { SIMD4(yaw, pitch, galaxyAltitude, site.spin) }
     private var yaw: Float = 0
     private var pitch: Float = 0.35
 
@@ -1166,6 +1255,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// patch of sky from a broken renderer; this can.
     private var census: [(d: SIMD3<Float>, b: Float)] = []
     /// Which way is up here, which way the planet turns, where its star is.
+    var galaxyHeart: SIMD3<Float> { heart }
     private(set) var site = LandingSite(axis: SIMD3(0, 1, 0), zenith0: SIMD3(0, 1, 0),
                                         east0: SIMD3(1, 0, 0), north0: SIMD3(0, 0, -1),
                                         sun: SIMD3(0, -1, 0))
@@ -1173,20 +1263,12 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// looks from there.
     private(set) var host: HostStar?
 
-    // ---- the planet turning ---------------------------------------
-    // A night is fast-forwarded by turning the ground, which is what a night
-    // actually is. The camera is carried along with it, so the landscape
-    // holds still and the whole sky wheels past -- and the motion eases out
-    // rather than stopping dead, because the point is to watch the star
-    // arrive, not to be teleported to it.
-    private var spinFrom: Float = 0
-    private var spinTo: Float = 0
+    // Photography lighting transition; the camera and ground remain fixed.
+    private var sunFrom = SIMD3<Float>(0, -1, 0)
+    private var sunTo = SIMD3<Float>(0, 1, 0)
     private var spinPhase: Float = 1          // 1 = standing still
     private var spinDuration: Float = 5.5
-    private var aimFrom: (yaw: Float, pitch: Float) = (0, 0)
-    private var aimTo: (yaw: Float, pitch: Float) = (0, 0)
-    private var sleptHours: Double = 0
-    /// True while the ground is turning under a fast-forward.
+    /// True while the sunlight is transitioning.
     var isTurning: Bool { spinPhase < 1 }
     /// Called once the turn has eased to a stop, with a line about it.
     var onTurnEnded: ((String) -> Void)?
@@ -1227,10 +1309,32 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
     /// the same star, seen by someone standing somewhere else.
     func reland() {
         var rng = SystemRandomNumberGenerator()
-        site = LandingSite.choose(heart: heart, rng: &rng)
+        land(at: LandingSite.choose(heart: heart, rng: &rng), horizonFirst: false)
+    }
+
+    /// Adopt the pad's heading without changing where the camera is looking.
+    func prepareNavigation(heading: SIMD3<Float>) {
+        let forward = site.east * sin(yaw) + site.north * cos(yaw)
+        site = LandingSite(axis: site.axis, zenith0: site.zenith,
+                           east0: simd_normalize(simd_cross(heading, site.zenith)),
+                           north0: heading, sun: site.sun, dayLength: site.dayLength)
+        yaw = atan2(simd_dot(forward, site.east), simd_dot(forward, site.north))
+    }
+
+    /// Parallel-transport the camera with the ship, including turns in place.
+    func navigate(at chosen: LandingSite, heading: SIMD3<Float>) {
+        abandonExposure(); dismissReview()
+        site = LandingSite(axis: site.axis, zenith0: chosen.zenith,
+                           east0: simd_normalize(simd_cross(heading, chosen.zenith)),
+                           north0: heading, sun: site.sun, dayLength: site.dayLength)
+        lastMovement = CACurrentMediaTime()
+    }
+
+    func land(at chosen: LandingSite, horizonFirst: Bool = true) {
+        site = chosen
         let opening = site.aim(at: heart)
         yaw = opening.yaw
-        pitch = max(-0.05, min(1.40, opening.pitch))
+        pitch = horizonFirst ? 0.18 : max(-0.05, min(1.40, opening.pitch))
         spinPhase = 1
         abandonExposure()
         dismissReview()
@@ -1242,64 +1346,34 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         lastMovement = CACurrentMediaTime()
     }
 
-    /// Fast-forward the planet's rotation until the host star has climbed
-    /// into view -- or, if it is already up, until it has set again and the
-    /// stars are back. Returns a line describing what is about to happen.
+    /// Move the sun for photography without rotating the galaxy or camera.
     @discardableResult
     func sleep() -> String {
         let wantsDaylight = site.altitude(of: site.sun) <= 0.01
-        let noon = site.spinForHighest(site.sun)
-        let target = wantsDaylight ? noon : noon + .pi
-        var delta = (target - site.spin).truncatingRemainder(dividingBy: 2 * .pi)
-        if delta < 0 { delta += 2 * .pi }
-        // Never less than half a turn. The sweep is the thing being shown;
-        // a two-degree nudge would read as a glitch rather than a night.
-        if delta < .pi { delta += 2 * .pi }
-
-        spinFrom = site.spin
-        spinTo = site.spin + delta
+        sunFrom = site.sun
+        let horizontal = site.east * sin(yaw) + site.north * cos(yaw)
+        sunTo = simd_normalize(horizontal * 0.8 + site.zenith * (wantsDaylight ? 0.6 : -0.6))
         spinPhase = 0
-        spinDuration = 5.5
-        sleptHours = Double(delta) / (2 * .pi) * site.dayLength
-
-        // Where to be looking when the turning stops. Going into daylight
-        // that is the star; coming back out of it, the galaxy.
-        var arrival = site
-        arrival.spin = spinTo
-        let subject = wantsDaylight ? arrival.sun : heart
-        let want = arrival.aim(at: subject)
-        // Take the short way round in azimuth, and leave the subject a
-        // little above the middle of the frame rather than dead centre.
-        var dy = (want.yaw - yaw).truncatingRemainder(dividingBy: 2 * .pi)
-        if dy > .pi { dy -= 2 * .pi }
-        if dy < -.pi { dy += 2 * .pi }
-        aimFrom = (yaw, pitch)
-        aimTo = (yaw + dy, max(-0.05, min(1.40, want.pitch + 0.10)))
-
+        spinDuration = 2.0
         abandonExposure()
         dismissReview()
         meteors.removeAll()
         prevBasis = nil
-        return wantsDaylight
-            ? String(format: "Sleeping %.0f hours · the ground turns until your star comes up", sleptHours)
-            : String(format: "Sleeping %.0f hours · turning back into the night", sleptHours)
+        return wantsDaylight ? "Bringing your star above the horizon" : "Returning to night"
     }
 
-    /// Stop the turn where it stands, for anyone who would rather look now.
+    /// Stop the light source where it is.
     func stopTurning() {
         guard spinPhase < 1 else { return }
         spinPhase = 1
         lastMovement = CACurrentMediaTime()
     }
 
-    /// Jump straight to the end of a turn. The review harness has no clock
-    /// of its own, so it cannot wait five seconds for an ease-out.
+    /// Finish the lighting transition immediately for deterministic reviews.
     func finishTurn() {
         guard spinPhase < 1 else { return }
         spinPhase = 1
-        site.spin = spinTo
-        yaw = aimTo.yaw
-        pitch = aimTo.pitch
+        site.sun = sunTo
         prevBasis = nil
         resetMeter()
     }
@@ -1880,17 +1954,12 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
             lastMovement = time
         }
 
-        // ---- the planet turning under the camera ---------------------
-        // Eased out, not linear: the first second covers most of the night
-        // and the last second almost none, so the star drifts to a halt
-        // instead of stopping dead. The camera is carried round with the
-        // ground, which is why the hills stay put while the sky sweeps.
+        // Ease the light source across the sky without moving the camera.
         if spinPhase < 1 {
             spinPhase = min(1, spinPhase + dt / max(spinDuration, 0.01))
             let eased = 1 - pow(1 - spinPhase, 3)
-            site.spin = spinFrom + (spinTo - spinFrom) * eased
-            yaw = aimFrom.yaw + (aimTo.yaw - aimFrom.yaw) * eased
-            pitch = aimFrom.pitch + (aimTo.pitch - aimFrom.pitch) * eased
+            let rotation = simd_quatf(from: sunFrom, to: sunTo)
+            site.sun = simd_slerp(simd_quatf(angle: 0, axis: site.zenith), rotation, eased).act(sunFrom)
             lastMovement = time
             if spinPhase >= 1 {
                 // Sunrise: a hundred thousand times the light there was at
@@ -1899,8 +1968,8 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
                 resetMeter()
                 let risen = site.altitude(of: site.sun) > 0
                 onTurnEnded?(risen
-                    ? String(format: "%.0f hours later · your star is up", sleptHours)
-                    : String(format: "%.0f hours later · night again", sleptHours))
+                    ? "Your star is up"
+                    : "Night again")
             }
         }
 
@@ -2217,9 +2286,14 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         float2(-1, 1), float2(1,-1), float2( 1,1)
     };
 
-    float ridge(float azimuth) {
-        return 0.012f + 0.025f*sin(azimuth*5.0f+1.1f)
-            + 0.014f*sin(azimuth*13.0f+0.7f) + 0.005f*sin(azimuth*37.0f);
+    float ridge(float azimuth, constant U &u) {
+        // Anchor the landscape to world directions, not the ship heading.
+        // Smooth position phases give travel parallax without pole seams.
+        float3 direction = u.east.xyz * sin(azimuth) + u.north.xyz * cos(azimuth);
+        float phase = dot(u.zenith.xyz, float3(2.1f, 3.7f, 1.3f));
+        return 0.012f + 0.025f*sin(dot(direction, float3(5,3,2)) + phase)
+            + 0.014f*sin(dot(direction, float3(7,-11,6)) + phase*2.1f)
+            + 0.005f*sin(dot(direction, float3(-23,17,29)) + phase*3.7f);
     }
 
     /// Integer bit-mix (a Wang/xorshift finalizer). Uncorrelated between
@@ -2311,7 +2385,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         // from the ground, and every altitude below is that frame's y.
         float3 direction = localDir(ray, u);
         float azimuth = atan2(direction.x, direction.z);
-        float horizon = ridge(azimuth);
+        float horizon = ridge(azimuth, u);
         float edge = direction.y - horizon;
 
         // No procedural dust, gas or glow here.
@@ -2394,7 +2468,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         // star is up, or the foreground would stay midnight-black at noon.
         float3 ground = u.horizonColour.rgb * 0.10f
                       + dayHue * (daylit * u.sunLight.y * 0.22f) * sunTrans;
-        float foreground = ridge(azimuth+1.7f)*0.7f - 0.10f;
+        float foreground = ridge(azimuth+1.7f, u)*0.7f - 0.10f;
         ground *= mix(0.40f, 1.0f,
                       smoothstep(foreground-0.002f, foreground+0.002f, direction.y));
 
@@ -2429,7 +2503,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         float3 L = localDir(d, u);
         float azimuth = atan2(L.x, L.z);
         float galAz = atan2(d.x, d.z);
-        bool below = L.y < ridge(azimuth) + 0.001f;
+        bool below = L.y < ridge(azimuth, u) + 0.001f;
         if (zNow <= 0.0f || below) {
             out.position = float4(0,0,-2,1);
             out.color = float3(0); out.flux = 0; out.spike = 0;
@@ -2589,7 +2663,7 @@ private final class ObservatoryMetalView: MTKView, MTKViewDelegate {
         // Both ends must be in front of the camera, and above the skyline.
         float azA = atan2(m.a.x, m.a.z), azB = atan2(m.b.x, m.b.z);
         bool hidden = zA <= 0.02f || zB <= 0.02f
-                   || m.a.y < ridge(azA) || m.b.y < ridge(azB);
+                   || m.a.y < ridge(azA, u) || m.b.y < ridge(azB, u);
         if (hidden || m.tint.w <= 0.0f) {
             out.position = float4(0, 0, -2, 1);
             out.color = float3(0); out.flux = 0;

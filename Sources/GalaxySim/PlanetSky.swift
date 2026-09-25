@@ -116,6 +116,16 @@ struct LandingSite {
                            sun: sun, spin: 0, dayLength: Double(rand(9, 41)))
     }
 
+    /// Move on this planet without changing its axis, sun, or day length.
+    func relocated(to normal: SIMD3<Float>) -> LandingSite {
+        let z = simd_normalize(normal)
+        let projected = axis - z * simd_dot(axis, z)
+        let north = simd_length_squared(projected) > 1e-8
+            ? simd_normalize(projected) : Self.perpendicular(to: z)
+        return LandingSite(axis: axis, zenith0: z, east0: simd_normalize(simd_cross(north, z)),
+                           north0: north, sun: sun, spin: 0, dayLength: dayLength)
+    }
+
     /// Any unit vector at right angles to `v`.
     private static func perpendicular(to v: SIMD3<Float>) -> SIMD3<Float> {
         let ref: SIMD3<Float> = abs(v.y) < 0.9 ? SIMD3(0, 1, 0) : SIMD3(1, 0, 0)

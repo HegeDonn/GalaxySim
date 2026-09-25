@@ -20,6 +20,7 @@ struct StellarProfile {
     let isRemnant: Bool
     /// The galaxy this star belongs to, when the caller knows it.
     let galaxyName: String
+    var planetSeed: UInt32 = 0
 
     static func make(index: Int, population: UInt32, galaxy: String = "") -> StellarProfile {
         var rng = GalaxyModels.RNG(seed: UInt64(index) &+ UInt64(population) * 0x9e3779b9)
@@ -84,7 +85,7 @@ struct StellarProfile {
             lifespanDescription: remnant ? "It will keep fading for billions of years to come." : "Stars like this one shine for about \(years(lifetime)) in all.",
             remainingLifeDescription: remnant ? "Its fire went out long ago — what you see is leftover heat." : "It still has roughly \(years(giant ? 2e8 : lifetime - age)) of fuel left.",
             fate: fate, color: NSColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1),
-            isRemnant: remnant, galaxyName: galaxy)
+            isRemnant: remnant, galaxyName: galaxy, planetSeed: UInt32(truncatingIfNeeded: index) &* 2654435761 &+ population)
     }
 
     private static func years(_ value: Double) -> String {
